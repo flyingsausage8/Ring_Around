@@ -1,0 +1,117 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Ring Around</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; margin: 0; padding: 24px; background: #14161a; color: #e8eaed; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: #9aa0a6; margin-bottom: 20px; font-size: 13px; }
+  button { font: inherit; padding: 9px 16px; border-radius: 7px; border: 1px solid #3c4043; background: #2a2d31; color: #e8eaed; cursor: pointer; margin: 0 6px 8px 0; }
+  button:hover:not(:disabled) { background: #35383d; }
+  button:disabled { opacity: .35; cursor: not-allowed; }
+  button.go { background: #1a6b3a; border-color: #1a6b3a; }
+  button.stop { background: #a51d1d; border-color: #a51d1d; }
+  .state { display: inline-block; padding: 3px 10px; border-radius: 20px; background: #2a2d31; font-size: 13px; }
+  .state.live { background: #1a6b3a; }
+  .state.stopping { background: #a51d1d; }
+  table { border-collapse: collapse; width: 100%; margin-top: 14px; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid #2a2d31; }
+  th { color: #9aa0a6; font-weight: 500; }
+  tr.calling { background: #1d2a20; }
+  .muted { color: #9aa0a6; }
+  .err { color: #f28b82; }
+  .ok { color: #81c995; }
+  section { margin-bottom: 26px; }
+</style>
+
+<h1>Ring Around</h1>
+<div class="sub">One call at a time. No retries. Pause finishes the call you are on; Stop hangs up now.</div>
+
+<section>
+  <button id="find">Find contractors</button>
+  <button id="findFixture">Use saved list</button>
+  <span id="foundNote" class="muted"></span>
+</section>
+
+<section>
+  <button id="startContractors" class="go">Start (call contractors)</button>
+  <button id="startPhone" class="go">Start (call my phone)</button>
+  <button id="pause">Pause</button>
+  <button id="resume">Resume</button>
+  <button id="stop" class="stop">Stop</button>
+  <span id="state" class="state">idle</span>
+  <span id="now" class="muted"></span>
+</section>
+
+<section>
+  <table>
+    <thead><tr><th>#</th><th>Company</th><th>Phone</th><th>Rating</th><th>Status</th><th>Outcome</th></tr></thead>
+    <tbody id="rows"><tr><td colspan="6" class="muted">Nothing found yet.</td></tr></tbody>
+  </table>
+</section>
+
+<script>
+  let found = [];
+
+  const $ = (id) => document.getElementById(id);
+  const post = (url, body) =>
+    fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}) }).then((r) => r.json());
+
+  async function find(source) {
+    $('foundNote').textContent = 'searching…';
+    const r = await post('/api/discover', { source, limit: 10 });
+    if (!r.ok) { $('foundNote').innerHTML = '<span class="err">' + r.error + '</span>'; return; }
+    found = r.contractors;
+    $('foundNote').textContent = found.length + ' found, best first';
+    draw({ items: found.map((c) => ({ name: c.name, phone: c.phone, rating: c.rating, reviews: c.reviews, status: 'waiting' })) });
+  }
+
+  function draw(status) {
+    const items = status.items || [];
+    if (!items.length) { $('rows').innerHTML = '<tr><td colspan="6" class="muted">Nothing found yet.</td></tr>'; return; }
+    $('rows').innerHTML = items
+      .map((x, i) => {
+        const rating = x.rating ? x.rating + '★ (' + (x.reviews || 0) + ')' : '';
+        const outcome = x.error ? '<span class="err">' + x.error + '</span>' : x.outcome ? '<span class="ok">' + x.outcome + '</span>' : '';
+        return '<tr class="' + (x.status === 'calling' ? 'calling' : '') + '"><td>' + (i + 1) + '</td><td>' + esc(x.name) +
+          '</td><td>' + esc(x.phone) + '</td><td class="muted">' + rating + '</td><td>' + x.status + '</td><td>' + outcome + '</td></tr>';
+      })
+      .join('');
+  }
+
+  const esc = (s) => String(s == null ? '' : s).replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
+
+  async function poll() {
+    try {
+      const s = await fetch('/api/status').then((r) => r.json());
+      const live = s.contractors.running ? s.contractors : s.phone.running ? s.phone : null;
+      const shown = live || (s.contractors.total ? s.contractors : s.phone.total ? s.phone : null);
+      const state = live ? live.state : shown ? shown.state : 'idle';
+
+      const el = $('state');
+      el.textContent = state;
+      el.className = 'state' + (state === 'in_call' || state === 'dialling' ? ' live' : state === 'stopping' ? ' stopping' : '');
+      $('now').textContent = live && live.current ? '→ ' + live.current.name + ' ' + live.current.phone : '';
+
+      if (shown && shown.items.length) draw(shown);
+      else if (found.length) draw({ items: found.map((c) => ({ name: c.name, phone: c.phone, rating: c.rating, reviews: c.reviews, status: 'waiting' })) });
+
+      const running = !!live;
+      $('startContractors').disabled = running || !found.length;
+      $('startPhone').disabled = running;
+      $('pause').disabled = !running;
+      $('stop').disabled = !running;
+      $('resume').disabled = running || !shown || !shown.waiting;
+    } catch {}
+  }
+
+  $('find').onclick = () => find('places');
+  $('findFixture').onclick = () => find('fixture');
+  $('startContractors').onclick = () => post('/api/start', { mode: 'contractors', targets: found }).then(poll);
+  $('startPhone').onclick = () => post('/api/start', { mode: 'phone' }).then(poll);
+  $('pause').onclick = () => post('/api/pause').then(poll);
+  $('stop').onclick = () => post('/api/stop').then(poll);
+  $('resume').onclick = () => post('/api/resume').then(poll);
+
+  poll();
+  setInterval(poll, 1500);
+</script>

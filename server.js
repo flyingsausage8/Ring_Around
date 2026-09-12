@@ -3,14 +3,24 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { WebSocketServer } from 'ws';
 import { cfg, checkEnv } from './config.js';
-import { Realtime } from './realtime.js';
-import { Playback } from './playback.js';
-import { Findings } from './findings.js';
-import { TOOLS, runTool } from './tools.js';
-import { buildInstructions, buildGreeting } from './briefing.js';
+import { CallSession } from './session.js';
+import { CallQueue } from './queue.js';
+import { makeDialer, claimPending } from './dialer.js';
+import { discover, loadFixture, rank } from './discovery.js';
 import * as log from './log.js';
 
 if (!checkEnv()) process.exit(1);
+
+const queue = new CallQueue({ dialer: makeDialer() });
+const phoneQueue = new CallQueue({ dialer: makeDialer({ toOverride: cfg.to }) });
+
+// Which of the two is allowed to own the line. Only ever one - the whole
+// point of this design is that two calls never happen at once.
+function activeQueue() {
+  if (queue.running) return queue;
+  if (phoneQueue.running) return phoneQueue;
+  return null;
+}
 
 function twiml() {
   const url = `wss://${cfg.publicHost}/media`;
@@ -22,38 +32,134 @@ function twiml() {
 </Response>`;
 }
 
-const server = http.createServer((req, res) => {
-  const path = req.url.split('?')[0];
+function json(res, code, body) {
+  res.writeHead(code, { 'content-type': 'application/json' });
+  res.end(JSON.stringify(body));
+}
 
-  if (path === '/health') {
-    res.writeHead(200, { 'content-type': 'application/json' });
-    return res.end(JSON.stringify({ ok: true, publicHost: cfg.publicHost || null }));
+function readBody(req) {
+  return new Promise((resolve) => {
+    let b = '';
+    req.on('data', (d) => (b += d));
+    req.on('end', () => {
+      try {
+        resolve(b ? JSON.parse(b) : {});
+      } catch {
+        resolve({});
+      }
+    });
+  });
+}
+
+const server = http.createServer(async (req, res) => {
+  const route = req.url.split('?')[0];
+
+  if (route === '/health') {
+    return json(res, 200, { ok: true, publicHost: cfg.publicHost || null });
   }
 
-  if (path === '/twiml') {
+  if (route === '/' || route === '/panel') {
+    const file = path.join(process.cwd(), 'panel.html');
+    if (!fs.existsSync(file)) {
+      res.writeHead(404);
+      return res.end('panel.html missing');
+    }
+    res.writeHead(200, { 'content-type': 'text/html' });
+    return res.end(fs.readFileSync(file));
+  }
+
+  if (route === '/twiml') {
     log.stage('TWILIO_FETCH_TWIML', `${req.method} from ${req.socket.remoteAddress}`);
     if (!cfg.publicHost) {
       log.fail('TWIML_SENT', 'PUBLIC_HOST is empty - Twilio would dial wss://undefined/media');
       res.writeHead(500);
       return res.end('PUBLIC_HOST not set');
     }
-    const body = twiml();
     res.writeHead(200, { 'content-type': 'text/xml' });
-    res.end(body);
+    res.end(twiml());
     log.stage('TWIML_SENT', `stream -> wss://${cfg.publicHost}/media`);
     return;
   }
 
-  if (path === '/status') {
-    let body = '';
-    req.on('data', (d) => (body += d));
-    req.on('end', () => {
-      const p = new URLSearchParams(body);
-      log.info('twilio status', `${p.get('CallStatus')} sid=${p.get('CallSid')} ${p.get('ErrorCode') ? 'err=' + p.get('ErrorCode') : ''}`);
-      res.writeHead(204);
-      res.end();
+  if (route === '/status') {
+    const body = await new Promise((r) => {
+      let b = '';
+      req.on('data', (d) => (b += d));
+      req.on('end', () => r(b));
     });
-    return;
+    const p = new URLSearchParams(body);
+    log.info('twilio status', `${p.get('CallStatus')} sid=${p.get('CallSid')} ${p.get('ErrorCode') ? 'err=' + p.get('ErrorCode') : ''}`);
+    res.writeHead(204);
+    return res.end();
+  }
+
+  // ---- control panel API ----
+
+  if (route === '/api/status') {
+    return json(res, 200, {
+      contractors: queue.status(),
+      phone: phoneQueue.status(),
+      publicHost: cfg.publicHost || null,
+    });
+  }
+
+  // Find companies to call, but do not call anybody. Looking and dialling are
+  // two separate buttons on purpose.
+  if (route === '/api/discover' && req.method === 'POST') {
+    const body = await readBody(req);
+    try {
+      const source = body.source === 'fixture' ? 'fixture' : 'places';
+      const list = source === 'fixture' ? rank(loadFixture()) : await discover({ ...body, source: 'places' });
+      return json(res, 200, { ok: true, source, contractors: list });
+    } catch (err) {
+      return json(res, 500, { ok: false, error: err.message });
+    }
+  }
+
+  if (route === '/api/start' && req.method === 'POST') {
+    const body = await readBody(req);
+    const phoneMode = body.mode === 'phone';
+    const q = phoneMode ? phoneQueue : queue;
+    if (activeQueue()) return json(res, 409, { ok: false, error: 'a call is already running' });
+
+    try {
+      let targets = body.targets;
+      if (phoneMode) {
+        // One call, to my own number, no matter what the browser sent.
+        targets = [{ name: 'my phone', phone: cfg.to, phoneSource: 'manual' }];
+      }
+      if (!Array.isArray(targets) || !targets.length) {
+        return json(res, 400, { ok: false, error: 'no targets - run discovery first' });
+      }
+      q.load(targets, { mode: phoneMode ? 'phone' : 'contractors' });
+      q.start().catch((err) => log.fail('QUEUE_START', err.message));
+      return json(res, 200, { ok: true, status: q.status() });
+    } catch (err) {
+      return json(res, 400, { ok: false, error: err.message });
+    }
+  }
+
+  if (route === '/api/pause' && req.method === 'POST') {
+    const q = activeQueue();
+    if (!q) return json(res, 200, { ok: true, note: 'nothing running' });
+    return json(res, 200, { ok: true, status: q.pause() });
+  }
+
+  if (route === '/api/stop' && req.method === 'POST') {
+    const q = activeQueue();
+    if (!q) return json(res, 200, { ok: true, note: 'nothing running' });
+    return json(res, 200, { ok: true, status: q.stop('stop pressed') });
+  }
+
+  if (route === '/api/resume' && req.method === 'POST') {
+    const q = queue.items.some((x) => x.status === 'waiting') ? queue : phoneQueue;
+    if (activeQueue()) return json(res, 409, { ok: false, error: 'already running' });
+    try {
+      q.resume().catch((err) => log.fail('QUEUE_START', err.message));
+      return json(res, 200, { ok: true, status: q.status() });
+    } catch (err) {
+      return json(res, 400, { ok: false, error: err.message });
+    }
   }
 
   res.writeHead(404);
@@ -66,211 +172,18 @@ wss.on('connection', (twilioWs, req) => {
   log.resetOnce();
   log.stage('TWILIO_WS_OPEN', `from ${req.socket.remoteAddress}`);
 
-  let streamSid = null;
-  let callSid = null;
-  let framesIn = 0;
-  let framesOut = 0;
-  let audioGaps = 0;
-  let lastCallerAudio = Date.now();
-  let lastStreamMs = null;
-  let closed = false;
-  let responsesInFlight = 0;
-  let hangupReason = null;
-  let hangupTimer = null;
+  const q = activeQueue();
+  const target = q?.current ? { name: q.current.name, phone: q.current.phone } : { name: 'unqueued call', phone: cfg.to };
 
-  const findings = new Findings();
+  const session = new CallSession({ twilioWs, target });
 
-  const playback = new Playback({
-    onSettled: ({ text, totalMs, heardMs, heardFraction }) => {
-      if (!text) return;
-      const pct = Math.round(heardFraction * 100);
-      if (pct >= 99) {
-        log.info('caller heard', JSON.stringify(text));
-      } else if (heardMs < 150) {
-        log.warn('never heard', `${JSON.stringify(text)}  (cut off before any of it played)`);
-      } else {
-        log.warn('partly heard', `${pct}% played (${(heardMs / 1000).toFixed(1)}s of ${(totalMs / 1000).toFixed(1)}s): ${JSON.stringify(text)}`);
-      }
-    },
-  });
-
-  const azure = new Realtime({
-    instructions: buildInstructions(),
-    tools: TOOLS,
-    onToolCall: (name, args) => runTool(findings, name, args, { onEndCall: requestHangup }),
-    onCallerTranscript: (text) => findings.noteCallerTurn(text),
-    onResponseStart: (id) => {
-      responsesInFlight++;
-      playback.startResponse(id);
-    },
-    onTranscript: (id, text, status) => {
-      responsesInFlight = Math.max(0, responsesInFlight - 1);
-      playback.endResponse(id, text, status);
-    },
-    onAudio: (b64, responseId) => {
-      if (!streamSid || twilioWs.readyState !== twilioWs.OPEN) return;
-      twilioWs.send(JSON.stringify({ event: 'media', streamSid, media: { payload: b64 } }));
-      framesOut++;
-      // Twilio echoes this mark back once the chunk has actually finished
-      // playing to the caller. That echo is the only honest signal we get.
-      const name = playback.queue(b64, responseId);
-      twilioWs.send(JSON.stringify({ event: 'mark', streamSid, mark: { name } }));
-      log.once('TWILIO_AUDIO_OUT', `streamSid=${streamSid}`);
-    },
-    onBargeIn: () => {
-      if (streamSid && twilioWs.readyState === twilioWs.OPEN) {
-        twilioWs.send(JSON.stringify({ event: 'clear', streamSid }));
-      }
-      const dropped = playback.clear();
-      if (dropped > 200) {
-        log.warn('interrupted', `stopped talking, dropped ${(dropped / 1000).toFixed(1)}s of audio the caller never heard`);
-      }
-    },
-    onClose: () => shutdown('azure closed'),
-  });
-
-  // The agent asked to hang up. Her goodbye is still sitting in Twilio's
-  // buffer at this point, so dropping the line now would cut her off mid
-  // sentence. Wait until she has stopped generating and Twilio has confirmed
-  // the last chunk actually played, then go. The cap is there so a stalled
-  // buffer can never hold the line open.
-  function requestHangup(reason) {
-    if (hangupReason) return;
-    hangupReason = reason;
-    const rude = reason === 'they_asked' || reason === 'hostile' || reason === 'no_one_there';
-    log.info('hangup asked', `${reason}${rude ? ' - going now' : ' - after the goodbye plays'}`);
-
-    if (rude) {
-      azure.cancelResponse();
-      hangupTimer = setTimeout(() => hangUp(reason), 500);
-      return;
-    }
-
-    const deadline = Date.now() + 20000;
-    const tick = () => {
-      if (closed) return;
-      const backlog = playback.backlogMs;
-      const busy = responsesInFlight > 0;
-      if (!busy && backlog <= 0) return hangUp(reason);
-      if (Date.now() > deadline) {
-        log.warn('hangup', `waited 20s and ${busy ? 'she is still talking' : `${(backlog / 1000).toFixed(1)}s is still queued`} - going anyway`);
-        return hangUp(reason);
-      }
-      hangupTimer = setTimeout(tick, 250);
-    };
-    hangupTimer = setTimeout(tick, 250);
+  // Hand the live call to whoever dialled it. If nothing was waiting, this is
+  // a call somebody started by hand - it still runs, it just is not in a list.
+  if (!claimPending(session)) {
+    log.warn('media', 'a call arrived that the queue did not dial - running it standalone');
   }
-
-  function hangUp(reason) {
-    log.info('hangup', `goodbye finished playing, dropping the line (${reason})`);
-    shutdown(`agent ended the call: ${reason}`);
-  }
-
-  function saveNotes() {
-    try {
-      fs.mkdirSync('calls', { recursive: true });
-      const name = `${new Date().toISOString().replace(/[:.]/g, '-')}-${callSid || 'nosid'}.json`;
-      const record = { callSid, startedAt: new Date(startedAt).toISOString(), framesIn, framesOut, audioGaps, ...findings.toJSON() };
-      fs.writeFileSync(path.join('calls', name), JSON.stringify(record, null, 2));
-      log.info('saved', `calls/${name}`);
-    } catch (err) {
-      log.warn('saved', `could not write the call notes: ${err.message}`);
-    }
-  }
-
-  function shutdown(why) {
-    if (closed) return;
-    closed = true;
-    clearInterval(timer);
-    if (hangupTimer) clearTimeout(hangupTimer);
-    log.info('shutdown', `${why} framesIn=${framesIn} framesOut=${framesOut} audioGaps=${audioGaps}`);
-    findings.print();
-    saveNotes();
-    azure.close();
-    try {
-      twilioWs.close();
-    } catch {}
-  }
-
-  const startedAt = Date.now();
-  const timer = setInterval(() => {
-    const idle = (Date.now() - lastCallerAudio) / 1000;
-    const total = (Date.now() - startedAt) / 1000;
-    if (total > cfg.maxCallSeconds) shutdown(`max call length ${cfg.maxCallSeconds}s`);
-    else if (idle > cfg.idleHangupSeconds * 3) shutdown(`no audio from phone for ${idle.toFixed(0)}s`);
-  }, 2000);
-
-  twilioWs.on('message', (raw) => {
-    let msg;
-    try {
-      msg = JSON.parse(raw.toString());
-    } catch {
-      return;
-    }
-
-    switch (msg.event) {
-      case 'start':
-        streamSid = msg.start.streamSid;
-        callSid = msg.start.callSid;
-        log.stage('TWILIO_STREAM_START', `callSid=${callSid} streamSid=${streamSid} codec=${msg.start.mediaFormat?.encoding}@${msg.start.mediaFormat?.sampleRate}`);
-        azure.connect();
-        azure.speakFirst(buildGreeting());
-        break;
-
-      case 'media': {
-        framesIn++;
-        const now = Date.now();
-        // Twilio stamps every frame with ms since the stream started. That is
-        // the call's own clock, so gaps in it are real gaps on the line
-        // rather than this process being busy.
-        const streamMs = Number(msg.media?.timestamp);
-        if (Number.isFinite(streamMs)) {
-          if (lastStreamMs !== null) {
-            const gap = streamMs - lastStreamMs;
-            if (gap > 400) {
-              audioGaps++;
-              log.warn('audio gap', `${gap}ms with no frame from Twilio (gap #${audioGaps})`);
-            }
-          }
-          lastStreamMs = streamMs;
-        }
-        lastCallerAudio = now;
-        log.once('CALLER_AUDIO_IN', `first frame, ${msg.media.payload.length} b64 chars`);
-        // Once she has decided to hang up, stop feeding Azure. Otherwise every
-        // "um" and "yeah" while she is saying goodbye starts another reply,
-        // and the goodbye never finishes - which is exactly how a call that
-        // was over at 591s was still going at 603s.
-        if (hangupReason) break;
-        if (azure.appendAudio(msg.media.payload)) log.once('AZURE_AUDIO_IN');
-        break;
-      }
-
-      // Twilio finished playing a chunk to the caller. This is the only
-      // event that tells us what was actually heard.
-      case 'mark': {
-        const lag = playback.confirmMark(msg.mark?.name);
-        if (lag !== null && log.once('PLAYBACK_CONFIRMED', `first chunk reached the caller ${lag}ms after we sent it`)) break;
-        break;
-      }
-
-      case 'stop':
-        log.info('twilio', 'stop frame');
-        shutdown('twilio sent stop');
-        break;
-
-      default:
-        break;
-    }
-  });
-
-  twilioWs.on('close', (code) => {
-    log.stage('TWILIO_WS_CLOSE', `code=${code} framesIn=${framesIn} framesOut=${framesOut}`);
-    shutdown('twilio socket closed');
-  });
-
-  twilioWs.on('error', (err) => log.fail('TWILIO_WS', err.message));
 });
 
 server.listen(cfg.port, () => {
-  log.stage('HTTP_LISTEN', `http://localhost:${cfg.port}  (/twiml /media /health /status)`);
+  log.stage('HTTP_LISTEN', `http://localhost:${cfg.port}  (panel at / , also /twiml /media /health /status /api/*)`);
 });

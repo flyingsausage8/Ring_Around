@@ -22,6 +22,7 @@ export class Findings {
     this.declined = [];        // what they would not answer, so we stop asking
     this.outcome = null;
     this.hangup = null;        // why the agent ended the call
+    this.badPickup = null;     // a machine answered, or nobody did
     this.callerTurns = 0;      // how many times they have actually said something
     this.lastCallerEmpty = true; // did the last thing we transcribed come back blank
   }
@@ -186,6 +187,14 @@ export class Findings {
     return { ok: true };
   }
 
+  // A machine picked up, or nobody did. This is a real outcome, not a failure
+  // - it just means there is nothing to be got from this number today.
+  noteBadPickup(kind, theirWords) {
+    this.badPickup = { kind, theirWords };
+    if (!this.outcome) this.outcome = { outcome: kind === 'wrong_number' ? 'declined' : 'no_answer', summary: `${kind} picked up` };
+    return { ok: true };
+  }
+
   // --- output --------------------------------------------------------------
 
   toJSON() {
@@ -204,6 +213,7 @@ export class Findings {
       declined: this.declined,
       outcome: this.outcome,
       hangup: this.hangup,
+      badPickup: this.badPickup,
     };
   }
 

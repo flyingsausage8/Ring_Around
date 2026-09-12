@@ -15,6 +15,10 @@ export const STAGES = [
   'ENV',                  // config loaded and sane
   'DISCOVERY_SEARCH',     // we asked for a list of companies
   'DISCOVERY_RESULTS',    // we got one back, with dialable numbers
+  'QUEUE_START',          // the queue began working through a list
+  'QUEUE_DIAL',           // the queue is placing one call
+  'QUEUE_CALL_DONE',      // that call finished, with an outcome
+  'QUEUE_DONE',           // the list is finished, paused or stopped
   'HTTP_LISTEN',          // our server is up
   'TUNNEL',               // public host answers
   'CALL_CREATE',          // we asked Twilio to dial

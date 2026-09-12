@@ -4,12 +4,13 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "node test-greeting.js && node test-playback.js && node test-tools.js && node test-toolcall.js && node test-discovery.js",
+    "test": "node test-greeting.js && node test-playback.js && node test-tools.js && node test-toolcall.js && node test-discovery.js && node test-queue.js",
     "start": "node server.js",
     "preflight": "node preflight.js",
     "call": "node call.js",
     "find": "node find.js",
-    "tunnel": "cloudflared.exe tunnel --url http://localhost:8080"
+    "tunnel": "cloudflared.exe tunnel --url http://localhost:8080",
+    "panel": "node server.js"
   },
   "repository": {
     "type": "git",

@@ -168,6 +168,27 @@ export const TOOLS = [
   },
   {
     type: 'function',
+    name: 'note_bad_pickup',
+    description:
+      'Call this the moment you realise you are not talking to a person who can help: an answering machine or voicemail greeting, an automated menu telling you to press a number, hold music, or a line that answered but has nobody on it. Do not leave a message, do not press anything, do not wait on hold. Call this and the call ends.',
+    parameters: {
+      type: 'object',
+      properties: {
+        kind: {
+          type: 'string',
+          enum: ['voicemail', 'phone_tree', 'hold_music', 'no_one_there', 'wrong_number'],
+          description: 'What picked up.',
+        },
+        theirWords: {
+          type: 'string',
+          description: 'Roughly what the recording or the menu said.',
+        },
+      },
+      required: ['kind'],
+    },
+  },
+  {
+    type: 'function',
     name: 'end_call',
     description:
       'Hang up. Say your goodbye first, then call this - your goodbye is played in full before the line actually drops. Call it right away, without a goodbye, only if they ask you to go, if they are hostile, or if nobody is there.',
@@ -199,6 +220,12 @@ const HANDLERS = {
 };
 
 export function runTool(findings, name, args, hooks = {}) {
+  if (name === 'note_bad_pickup') {
+    const kind = String((args && args.kind) || 'no_one_there');
+    findings.noteBadPickup(kind, args?.theirWords);
+    if (typeof hooks.onEndCall === 'function') hooks.onEndCall('no_one_there');
+    return { ok: true, note: 'noted - stop talking, the call is ending' };
+  }
   if (name === 'end_call') {
     const reason = String((args && args.reason) || 'said_goodbye');
     // Ending the call because of something they supposedly said needs them to

@@ -31,6 +31,13 @@ export const cfg = {
   temperature: Number(process.env.AGENT_TEMPERATURE || 0.8),
   idleHangupSeconds: Number(process.env.IDLE_HANGUP_SECONDS || 20),
   maxCallSeconds: Number(process.env.MAX_CALL_SECONDS || 180),
+  // How long we will sit on a line where nobody has said a word. Long enough
+  // for a slow "hello?", short enough not to talk at an empty room.
+  deadAirSeconds: Number(process.env.DEAD_AIR_SECONDS || 25),
+  // How long the phone may ring before Twilio gives up.
+  ringSeconds: Number(process.env.RING_SECONDS || 25),
+  // Breathing room between calls, so the queue is not machine-gunning the line.
+  gapBetweenCallsMs: Number(process.env.GAP_BETWEEN_CALLS_MS || 4000),
 
   // The demo job the agent is calling about. Placeholder until discovery
   // feeds real jobs in.
