@@ -65,6 +65,7 @@ wss.on('connection', (twilioWs, req) => {
   let callSid = null;
   let framesIn = 0;
   let framesOut = 0;
+  let audioGaps = 0;
   let lastCallerAudio = Date.now();
   let closed = false;
 
@@ -88,7 +89,7 @@ wss.on('connection', (twilioWs, req) => {
     if (closed) return;
     closed = true;
     clearInterval(timer);
-    log.info('shutdown', `${why} framesIn=${framesIn} framesOut=${framesOut}`);
+    log.info('shutdown', `${why} framesIn=${framesIn} framesOut=${framesOut} audioGaps=${audioGaps}`);
     azure.close();
     try {
       twilioWs.close();
@@ -122,7 +123,16 @@ wss.on('connection', (twilioWs, req) => {
 
       case 'media': {
         framesIn++;
-        lastCallerAudio = Date.now();
+        const now = Date.now();
+        // Twilio sends a frame every 20ms. A long gap is the network
+        // stalling, not the caller going quiet - worth seeing in the log
+        // before you start blaming the model for "lag".
+        const gap = now - lastCallerAudio;
+        if (framesIn > 1 && gap > 400) {
+          audioGaps++;
+          log.warn('audio gap', `${gap}ms with no frame from Twilio (gap #${audioGaps})`);
+        }
+        lastCallerAudio = now;
         log.once('CALLER_AUDIO_IN', `first frame, ${msg.media.payload.length} b64 chars`);
         if (azure.appendAudio(msg.media.payload)) log.once('AZURE_AUDIO_IN');
         break;

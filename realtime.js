@@ -16,6 +16,14 @@ export class Realtime {
     this.ws = null;
     this.ready = false;
     this.queued = [];
+    this.speechStoppedAt = null;
+    this.latencyLogged = false;
+    this.greetingPrompt = null;
+    this.greetingPending = false;
+    this.greetingAttempts = 0;
+    this.greetingResponseId = null;
+    this.awaitingGreetingId = false;
+    this.audioFramesThisResponse = 0;
   }
 
   connect() {
@@ -40,7 +48,15 @@ export class Realtime {
       this.#sendSession();
     });
 
-    this.ws.on('message', (raw) => this.#onMessage(raw));
+    this.ws.on('message', (raw) => {
+      let ev;
+      try {
+        ev = JSON.parse(raw.toString());
+      } catch {
+        return log.warn('AZURE_WS', 'non-JSON frame');
+      }
+      this.onAzureEvent(ev);
+    });
 
     this.ws.on('error', (err) => log.fail('AZURE_WS', err.message));
 
@@ -79,14 +95,8 @@ export class Realtime {
     log.stage('AZURE_SESSION_SENT', `voice=${cfg.voice} format=audio/pcmu vad=semantic`);
   }
 
-  #onMessage(raw) {
-    let ev;
-    try {
-      ev = JSON.parse(raw.toString());
-    } catch {
-      return log.warn('AZURE_WS', 'non-JSON frame');
-    }
-
+  // Public so tests can drive it with fake events. Takes a parsed event.
+  onAzureEvent(ev) {
     switch (ev.type) {
       case 'session.created':
         log.info('azure', `session.created id=${ev.session?.id || '?'}`);
@@ -100,17 +110,43 @@ export class Realtime {
         }
         break;
 
+      case 'response.created':
+        this.audioFramesThisResponse = 0;
+        // Tie the retry logic to this exact response id, so a reply triggered
+        // by the caller talking can never be mistaken for the greeting.
+        if (this.awaitingGreetingId) {
+          this.greetingResponseId = ev.response?.id || null;
+          this.awaitingGreetingId = false;
+        }
+        break;
+
       // GA calls it response.output_audio.delta, preview called it
       // response.audio.delta. Accept both so an api-version bump can't mute us.
       case 'response.output_audio.delta':
       case 'response.audio.delta':
+        this.audioFramesThisResponse++;
         log.once('AZURE_AUDIO_OUT', `${ev.delta?.length || 0} b64 chars`);
+        if (this.speechStoppedAt && !this.latencyLogged) {
+          this.latencyLogged = true;
+          const ms = Date.now() - this.speechStoppedAt;
+          const verdict = ms < 800 ? 'snappy' : ms < 1500 ? 'ok' : 'SLOW - caller will notice';
+          log.info('reply latency', `${ms}ms (${verdict})`);
+        }
         this.onAudio(ev.delta);
         break;
 
       case 'input_audio_buffer.speech_started':
         log.info('azure', 'caller started talking -> barge in');
+        this.speechStoppedAt = null;
         this.onBargeIn();
+        break;
+
+      // Time from "caller stopped talking" to "first audio of the reply" is
+      // the number the person on the phone actually feels. Anything past a
+      // second or so and they start saying "hello?".
+      case 'input_audio_buffer.speech_stopped':
+        this.speechStoppedAt = Date.now();
+        this.latencyLogged = false;
         break;
 
       case 'conversation.item.input_audio_transcription.completed':
@@ -124,6 +160,28 @@ export class Realtime {
 
       case 'response.done': {
         const status = ev.response?.status;
+        const cancelled = status === 'cancelled';
+        const isGreeting = this.greetingPending && ev.response?.id === this.greetingResponseId;
+
+        // The greeting carries the AI disclosure, so it is the one turn that
+        // must not get eaten. Line noise at pickup can trip the VAD before a
+        // single word is out - when that happens the reply is cancelled with
+        // zero audio produced, so say it again. Only counts audio frames and
+        // compares ids, never inspects what anyone said.
+        if (isGreeting && cancelled && this.audioFramesThisResponse === 0) {
+          this.greetingAttempts++;
+          if (this.greetingAttempts <= 2) {
+            log.warn('greeting', `cancelled before any audio (attempt ${this.greetingAttempts}) - saying it again`);
+            setTimeout(() => this.#createGreeting(), 400);
+          } else {
+            log.fail('greeting', 'cancelled 3 times - giving up, disclosure may not have been heard');
+            this.greetingPending = false;
+          }
+        } else if (isGreeting && this.audioFramesThisResponse > 0) {
+          this.greetingPending = false;
+          log.info('greeting', 'delivered');
+        }
+
         if (status && status !== 'completed') {
           log.warn('azure', `response ${status}: ${JSON.stringify(ev.response?.status_details || {}).slice(0, 300)}`);
         }
@@ -155,10 +213,18 @@ export class Realtime {
   }
 
   speakFirst(prompt) {
-    this.whenReady(() => {
-      this.#raw({ type: 'response.create', response: { instructions: prompt } });
-      log.stage('AGENT_GREET', JSON.stringify(prompt).slice(0, 120));
-    });
+    this.greetingPrompt = prompt;
+    this.greetingPending = true;
+    this.greetingAttempts = 0;
+    this.whenReady(() => this.#createGreeting());
+  }
+
+  #createGreeting() {
+    if (!this.greetingPending) return;
+    this.audioFramesThisResponse = 0;
+    this.awaitingGreetingId = true;
+    this.#raw({ type: 'response.create', response: { instructions: this.greetingPrompt } });
+    log.stage('AGENT_GREET', JSON.stringify(this.greetingPrompt).slice(0, 120));
   }
 
   cancelResponse() {
