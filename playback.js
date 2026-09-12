@@ -84,13 +84,15 @@ export class Playback {
   }
 
   // Azure finished (or cancelled) a response, and we have its transcript.
+  // A cancelled response is settled straight away: whatever has not played by
+  // now never will, because the buffer behind it has already been dropped.
   endResponse(id, text, status) {
     const row = this.responses.get(id);
     if (!row) return;
     row.text = text ?? row.text;
     row.status = status ?? row.status;
     if (row.endMs === null) row.endMs = row.lastMs;
-    this.#settle();
+    this.#settle({ flush: status === 'cancelled' });
   }
 
   // How far behind the caller is right now, in ms of audio still queued.

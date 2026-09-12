@@ -105,7 +105,7 @@ wss.on('connection', (twilioWs, req) => {
       }
       const dropped = playback.clear();
       if (dropped > 200) {
-        log.warn('barge-in', `dropped ${(dropped / 1000).toFixed(1)}s of audio the caller never heard`);
+        log.warn('interrupted', `stopped talking, dropped ${(dropped / 1000).toFixed(1)}s of audio the caller never heard`);
       }
     },
     onClose: () => shutdown('azure closed'),

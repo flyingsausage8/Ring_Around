@@ -142,9 +142,12 @@ export class Realtime {
         break;
 
       case 'input_audio_buffer.speech_started':
-        log.info('azure', 'caller started talking -> barge in');
+        // Sound started, but that is not the same as an interruption. Let
+        // semantic VAD decide whether this is a real turn or just a "mm-hm" -
+        // if we dropped the buffer here, every backchannel would punch a hole
+        // in the middle of her sentence. The cancel below is the real signal.
+        log.info('azure', 'caller audio started');
         this.speechStoppedAt = null;
-        this.onBargeIn();
         break;
 
       // Time from "caller stopped talking" to "first audio of the reply" is
@@ -193,6 +196,11 @@ export class Realtime {
         if (status && status !== 'completed') {
           log.warn('azure', `response ${status}: ${JSON.stringify(ev.response?.status_details || {}).slice(0, 300)}`);
         }
+        // Azure has judged this a genuine interruption and stopped generating.
+        // Now, and only now, drop whatever is still queued on the phone -
+        // otherwise she keeps talking out of Twilio's buffer after she has
+        // stopped being produced.
+        if (cancelled) this.onBargeIn();
         this.onTranscript(ev.response?.id || null, this.pendingTranscript ?? '', status);
         this.pendingTranscript = null;
         break;
