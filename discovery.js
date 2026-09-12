@@ -18,6 +18,7 @@
 // quietly - it rings a stranger's house, and an AI starts talking to them.
 
 import fs from 'node:fs';
+import { cfg } from './config.js';
 import * as log from './log.js';
 
 const FIXTURE = 'contractors.local.json';
@@ -124,15 +125,36 @@ const FIELDS = [
 
 export async function searchPlaces({
   query = 'appliance repair',
-  area = '',
+  // Where the client actually lives. Without this the search is nationwide and
+  // comes back with shops a thousand miles away - a 515 number is Iowa, and no
+  // amount of good ratings makes that useful to somebody in Redmond.
+  area = [cfg.job.area, cfg.job.zip].filter(Boolean).join(' '),
   limit = 10,
   key = process.env.GOOGLE_MAPS_API_KEY,
   fetchImpl = fetch,
 } = {}) {
   if (!key) throw new Error('GOOGLE_MAPS_API_KEY is not set - cannot search Places');
+  if (!area) throw new Error('no area to search in - set JOB_AREA and JOB_ZIP');
 
-  const textQuery = area ? `${query} in ${area}` : query;
+  const textQuery = `${query} in ${area}`;
   log.stage('DISCOVERY_SEARCH', `places text search: ${JSON.stringify(textQuery)} limit=${limit}`);
+
+  // The words are a hint; this is the hard boundary. Places weights results
+  // inside the circle, so "in Redmond" cannot drift to another state.
+  const payload = {
+    textQuery,
+    maxResultCount: Math.min(limit, 20),
+    languageCode: 'en',
+    regionCode: 'US',
+  };
+  if (Number.isFinite(cfg.job.lat) && Number.isFinite(cfg.job.lng)) {
+    payload.locationBias = {
+      circle: {
+        center: { latitude: cfg.job.lat, longitude: cfg.job.lng },
+        radius: cfg.job.radiusMeters,
+      },
+    };
+  }
 
   let res;
   try {
@@ -143,7 +165,7 @@ export async function searchPlaces({
         'X-Goog-Api-Key': key,
         'X-Goog-FieldMask': FIELDS,
       },
-      body: JSON.stringify({ textQuery, maxResultCount: Math.min(limit, 20), languageCode: 'en' }),
+      body: JSON.stringify(payload),
     });
   } catch (err) {
     throw new Error(`could not reach Google Places: ${err.message}`);
@@ -224,20 +246,28 @@ export async function discover({ source = 'places', ranked = true, ...opts } = {
 // anything anyone wrote.
 //
 // A plain sort by stars puts a 5.0 with one review above a 4.8 with a
-// thousand, which is backwards: one review is not evidence. So each rating is
-// pulled toward the average until enough reviews back it up. That is a
-// Bayesian prior, and it is the standard fix for exactly this.
+// thousand, which is backwards: one review is not evidence. So the stars are
+// multiplied by a confidence bonus that grows with the number of reviews:
 //
-// With PRIOR = 20, a business needs about 20 reviews before its own rating
-// counts for most of its score.
-const PRIOR = 20;
-const AVERAGE = 4.3;
+//   score = stars * (1 + log10(reviews) / 10)
+//
+// Each tenfold jump in reviews is worth another 10%, which keeps the stars in
+// charge while still rewarding a long track record:
+//
+//        1 review  -> x1.0      4.8 -> 4.80
+//       10 reviews -> x1.1      4.8 -> 5.28
+//      100 reviews -> x1.2      4.8 -> 5.76
+//     1000 reviews -> x1.3      4.8 -> 6.24
+//
+// A place with no reviews has nothing to be confident about, so it scores 0
+// and sinks - it is not rejected, just last.
+const PER_DECADE = 0.1;
 
 export function score(c) {
   const rating = Number(c.rating);
   const reviews = Number(c.reviews);
   if (!Number.isFinite(rating) || !Number.isFinite(reviews) || reviews <= 0) return 0;
-  return (reviews * rating + PRIOR * AVERAGE) / (reviews + PRIOR);
+  return rating * (1 + (Math.log10(reviews) * PER_DECADE));
 }
 
 export function rank(list) {

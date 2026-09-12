@@ -26,6 +26,19 @@ export const cfg = {
 
   agentName: process.env.AGENT_NAME || 'Sam',
   voice: process.env.AGENT_VOICE || 'marin',
+  // How long semantic VAD waits before deciding the other person has finished.
+  //
+  // This was set to "low" to stop her answering a "mm-hm" as if it were a whole
+  // turn. It backfired badly: on a live call it waited so long for a "real" end
+  // of turn that the contractor's speech barely registered at all - three turns
+  // detected in thirty seconds, him repeating his own name to a line that was
+  // not listening, and her monologuing over the top because nothing ever came
+  // back as an interruption. Failing to hear someone is far worse than
+  // answering them twice.
+  //
+  // "auto" is what she was doing better with. The double-reply it used to cause
+  // is fixed properly now - in the tool follow-up rule in realtime.js, and in
+  // the briefing - rather than by making her deaf.
   eagerness: process.env.AGENT_EAGERNESS || 'auto',
   speed: Number(process.env.AGENT_SPEED || 1),
   temperature: Number(process.env.AGENT_TEMPERATURE || 0.8),
@@ -34,6 +47,11 @@ export const cfg = {
   // How long we will sit on a line where nobody has said a word. Long enough
   // for a slow "hello?", short enough not to talk at an empty room.
   deadAirSeconds: Number(process.env.DEAD_AIR_SECONDS || 25),
+  // A business answers the phone by saying who it is - "Appliance Repair, this
+  // is Dave". Starting the instant the line opens talks straight over that, so
+  // they miss the disclosure and spend the next twenty seconds repeating their
+  // own name. Let them go first.
+  greetingDelayMs: Number(process.env.GREETING_DELAY_MS || 2000),
   // How long the phone may ring before Twilio gives up.
   ringSeconds: Number(process.env.RING_SECONDS || 25),
   // Breathing room between calls, so the queue is not machine-gunning the line.
@@ -46,6 +64,11 @@ export const cfg = {
     company: process.env.JOB_COMPANY || '',
     area: process.env.JOB_AREA || 'the local area',
     zip: process.env.JOB_ZIP || '',
+    // Where to centre the search for contractors. Words alone are a weak hint -
+    // "appliance repair" with no coordinates returns shops in other states.
+    lat: Number(process.env.JOB_LAT || 47.6740),
+    lng: Number(process.env.JOB_LNG || -122.1215),
+    radiusMeters: Number(process.env.JOB_RADIUS_METERS || 30000),
     address: process.env.JOB_ADDRESS || '',
     phone: process.env.JOB_PHONE || '',
     availability: process.env.JOB_AVAILABILITY || 'most weekday afternoons',
@@ -53,7 +76,6 @@ export const cfg = {
     brand: process.env.JOB_BRAND || '',
     fuel: process.env.JOB_FUEL || '',
     age: process.env.JOB_AGE || '',
-    errorCode: process.env.JOB_ERROR_CODE || '',
     budgetLow: Number(process.env.JOB_BUDGET_LOW || 0) || null,
     budgetHigh: Number(process.env.JOB_BUDGET_HIGH || 0) || null,
   },

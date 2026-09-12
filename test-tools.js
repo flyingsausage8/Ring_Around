@@ -3,6 +3,7 @@
 // These run without a phone, a tunnel or Azure. Every check here is a bug that
 // would otherwise only show up mid-call, in front of a real contractor.
 
+import fs from 'node:fs';
 import { Findings } from './findings.js';
 import { TOOLS, runTool } from './tools.js';
 
@@ -105,15 +106,79 @@ console.log('\nmoney and minutes');
   ok('a free call-out is recorded, not treated as missing', f().noteCallout({ feeUsd: 0 }).ok === true);
   ok('a call-out with no number is refused', f().noteCallout({ feeUsd: 'depends' }).ok === false);
   ok('a duration is recorded', f().noteJobDuration({ minMinutes: 60, maxMinutes: 90 }).ok === true);
-  ok('a 30 hour duration is refused', f().noteJobDuration({ minMinutes: 1800 }).ok === false);
+  // The bug this replaces: the ceiling was 24 hours, so "an hour to maybe two
+  // days" had its maximum silently dropped and recorded as a flat 60 minutes.
+  ok('two days is a real answer, not an error', (() => {
+    const x = f();
+    const r = x.noteJobDuration({ minMinutes: 60, maxMinutes: 2880 });
+    return r.ok === true && x.jobDuration.minMinutes === 60 && x.jobDuration.maxMinutes === 2880;
+  })());
+  ok('a maximum we cannot use is refused, never quietly replaced by the minimum', (() => {
+    const x = f();
+    const r = x.noteJobDuration({ minMinutes: 60, maxMinutes: 'a couple of days' });
+    return r.ok === false && x.jobDuration === null;
+  })());
+  ok('a single figure still fills both ends', (() => {
+    const x = f();
+    x.noteJobDuration({ minMinutes: 45 });
+    return x.jobDuration.minMinutes === 45 && x.jobDuration.maxMinutes === 45;
+  })());
+  ok('a backwards range is refused', f().noteJobDuration({ minMinutes: 120, maxMinutes: 30 }).ok === false);
+  ok('an absurd duration is still refused', f().noteJobDuration({ minMinutes: 99999 }).ok === false);
+  ok('a non-numeric duration is refused', f().noteVisitDuration({ minMinutes: 'half an hour' }).ok === false);
+}
+
+console.log('\ncorrecting a time slot');
+{
+  // A contractor said "Thursday, 1 to 3", then corrected himself to "1 to 2".
+  // Both were kept, and the portal showed the stale one - so the customer
+  // would have been told the wrong window.
+  const thu = () => new Findings({
+    client: 'Yihan Sun',
+    windows: [{ day: 'thu', startMin: 12 * 60, endMin: 18 * 60 }],
+  });
+
+  ok('a corrected window replaces the one it overlaps', (() => {
+    const x = thu();
+    x.noteTimeSlot({ day: 'thu', startTime: '13:00', endTime: '15:00', theirWords: '1 to 3' });
+    const r = x.noteTimeSlot({ day: 'thu', startTime: '13:00', endTime: '14:00', theirWords: '1 to 2' });
+    return r.ok === true && x.slots.length === 1 && x.slots[0].endTime === '14:00';
+  })());
+
+  ok('...and says so, so she can read the right one back', (() => {
+    const x = thu();
+    x.noteTimeSlot({ day: 'thu', startTime: '13:00', endTime: '15:00' });
+    return String(x.noteTimeSlot({ day: 'thu', startTime: '13:00', endTime: '14:00' }).note || '').includes('replaced');
+  })());
+
+  ok('a genuinely separate window on the same day is still kept', (() => {
+    const x = thu();
+    x.noteTimeSlot({ day: 'thu', startTime: '13:00', endTime: '14:00' });
+    x.noteTimeSlot({ day: 'thu', startTime: '16:00', endTime: '17:00' });
+    return x.slots.length === 2;
+  })());
+
+  ok('an identical repeat is not counted twice', (() => {
+    const x = thu();
+    x.noteTimeSlot({ day: 'thu', startTime: '13:00', endTime: '14:00' });
+    x.noteTimeSlot({ day: 'thu', startTime: '13:00', endTime: '14:00' });
+    return x.slots.length === 1;
+  })());
 }
 
 console.log('\nsilence is not an answer');
+// She has to have asked before any of these answers mean anything, so every
+// case below starts with the greeting and the question already delivered.
+const asked = (n) => {
+  n.noteAgentTurn('Hi, this is Mia, an AI assistant calling for Yihan Sun.');
+  n.noteAgentTurn('Do you cover Redmond, 98053?');
+  return n;
+};
 {
   // This is the bug that hung up on a real caller mid-sentence: Whisper
   // returned an empty transcript, the model read that nothing as "no, we
   // don't cover you", and the call ended while they were still talking.
-  const n = f();
+  const n = asked(f());
   n.noteCallerTurn('');
   const r = n.noteServiceArea({ covers: false, theirWords: 'Okay' });
   ok('out of area cannot be recorded off a blank transcript', r.ok === false, JSON.stringify(r));
@@ -126,7 +191,7 @@ console.log('\nsilence is not an answer');
 }
 {
   // The same guard must not get in the way of a real answer.
-  const n = f();
+  const n = asked(f());
   n.noteCallerTurn('No, we only cover Seattle proper.');
   ok('a real out of area answer still records', n.noteServiceArea({ covers: false }).ok === true);
   let ended = null;
@@ -135,9 +200,29 @@ console.log('\nsilence is not an answer');
 }
 {
   // "Yes we cover you" does not end the call, so it never needs the guard.
-  const n = f();
+  const n = asked(f());
   n.noteCallerTurn('');
   ok('a yes is recorded even on a patchy line', n.noteServiceArea({ covers: true }).ok === true);
+}
+{
+  // The real call: Dave said "Okay." while she was still mid-paragraph, and she
+  // wrote down "yes, they cover it" before the question had even finished
+  // playing down the line. The greeting is not a question.
+  const n = f();
+  n.noteAgentTurn('Hi, this is Mia, an AI assistant calling for Yihan Sun.');
+  n.noteCallerTurn('Hi, this is Dave, Appliance Repair.');
+  n.noteCallerTurn('Okay.');
+  const r = n.noteServiceArea({ covers: true, theirWords: 'Okay.' });
+  ok('an answer cannot be recorded before she has finished asking', r.ok === false, JSON.stringify(r));
+  ok('...and nothing was written down', n.serviceArea === null);
+  ok('...and once she has asked, it records', asked(n).noteServiceArea({ covers: true }).ok === true);
+}
+{
+  // A question the caller never heard is not a question that was asked.
+  const n = f();
+  ok('the greeting alone is not a question', f().askedSomething() === false);
+  n.noteAgentTurn('');
+  ok('a turn with no words does not count', n.agentTurns === 0);
 }
 {
   // Saying goodbye at the natural end of a call rests on nothing they said.
@@ -155,6 +240,32 @@ console.log('\nsilence is not an answer');
   ok('...because the thing we just heard was nothing', n.heardSomething() === false);
 }
 
+console.log('\na late machine verdict never beats a live person');
+{
+  // The base fix for this lives in dialer.js: Twilio is asked for a plain
+  // human-or-machine verdict with a five second ceiling, instead of being told
+  // to wait for an answering machine to finish its outgoing greeting. That is
+  // what made a verdict land thirty seconds in, halfway through a real
+  // conversation, and hang up on the man we were talking to.
+  const src = fs.readFileSync(new URL('./dialer.js', import.meta.url), 'utf8');
+  ok('machine detection is not told to wait for a message to end', !/machineDetection:\s*'DetectMessageEnd'/.test(src));
+  ok('...it just answers human or machine', /machineDetection:\s*'Enable'/.test(src));
+  ok('...within a hard time limit', /machineDetectionTimeout:\s*\d+/.test(src));
+  const secs = Number((src.match(/machineDetectionTimeout:\s*(\d+)/) || [])[1]);
+  ok('...and that limit is short enough to beat any conversation', secs > 0 && secs <= 10, `${secs}s`);
+}
+{
+  // A real voicemail must still be recordable. Its greeting is speech, and it
+  // can easily transcribe as several turns, so nothing here may depend on how
+  // much the other end said.
+  const n = f();
+  n.noteCallerTurn('Hi, you have reached Dave at Appliance Repair.');
+  n.noteCallerTurn('We are not available right now.');
+  n.noteCallerTurn('Please leave a message after the tone.');
+  ok('voicemail is recorded however chatty its greeting is', n.noteBadPickup('voicemail', 'Twilio heard machine_start').ok === true);
+  ok('...and the call is filed as no_answer', n.outcome.outcome === 'no_answer');
+}
+
 console.log('\nrefusals and outcome');
 {
   const n = f();
@@ -162,6 +273,7 @@ console.log('\nrefusals and outcome');
   ok('a refusal is recorded', r.ok === true);
   ok('...and tells the agent to stop asking', /do not ask about that again/.test(r.note || ''), r.note);
   n.noteCallerTurn('We do not go out that far, sorry.');
+  asked(n);
   n.noteServiceArea({ covers: false });
   ok('an out of area answer is recorded', n.serviceArea.covers === false);
   n.noteOutcome({ outcome: 'out_of_area', summary: 'they only do the east side' });

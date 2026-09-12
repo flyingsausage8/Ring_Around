@@ -11,12 +11,24 @@ import path from 'node:path';
 import * as log from './log.js';
 
 export class Transcript {
-  constructor({ callSid = null, to = null, company = null } = {}) {
+  constructor({ callSid = null, to = null, company = null, onLine = null } = {}) {
+    // Someone watching the portal wants the line now, not when the call ends.
+    this.onLine = onLine;
     this.callSid = callSid;
     this.to = to;
     this.company = company;
     this.startedAt = Date.now();
     this.lines = [];
+  }
+
+  push(line) {
+    this.lines.push(line);
+    if (this.onLine) {
+      try {
+        this.onLine(line);
+      } catch {}
+    }
+    return line;
   }
 
   #at() {
@@ -27,14 +39,14 @@ export class Transcript {
     const said = String(text ?? '').trim();
     // An empty transcript is not nothing worth knowing - it is the signal that
     // the line went quiet, which is exactly what tricked the agent once.
-    this.lines.push({ at: this.#at(), who: 'them', text: said, blank: said.length === 0 });
+    this.push({ at: this.#at(), who: 'them', text: said, blank: said.length === 0 });
   }
 
   // Called when a response settles, once we know how much of it played.
   agent(text, { heardFraction = 1, heardMs = null, totalMs = null, status = 'completed' } = {}) {
     const said = String(text ?? '').trim();
     if (!said) return;
-    this.lines.push({
+    this.push({
       at: this.#at(),
       who: 'agent',
       text: said,
@@ -46,7 +58,7 @@ export class Transcript {
   }
 
   tool(name, args, result) {
-    this.lines.push({
+    this.push({
       at: this.#at(),
       who: 'tool',
       tool: name,
@@ -57,7 +69,7 @@ export class Transcript {
   }
 
   event(text) {
-    this.lines.push({ at: this.#at(), who: 'system', text });
+    this.push({ at: this.#at(), who: 'system', text });
   }
 
   // Plain text, for reading. The percentages are the honest part.

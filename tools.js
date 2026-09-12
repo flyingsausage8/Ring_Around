@@ -224,7 +224,7 @@ export function runTool(findings, name, args, hooks = {}) {
     const kind = String((args && args.kind) || 'no_one_there');
     findings.noteBadPickup(kind, args?.theirWords);
     if (typeof hooks.onEndCall === 'function') hooks.onEndCall('no_one_there');
-    return { ok: true, note: 'noted - stop talking, the call is ending' };
+    return { ok: true, ending: true, note: 'noted - stop talking, the call is ending' };
   }
   if (name === 'end_call') {
     const reason = String((args && args.reason) || 'said_goodbye');
@@ -243,7 +243,7 @@ export function runTool(findings, name, args, hooks = {}) {
     if (typeof hooks.onEndCall === 'function') hooks.onEndCall(reason);
     // The line does not drop here. server.js waits for the goodbye to finish
     // playing out of Twilio's buffer first.
-    return { ok: true, note: 'wrapping up - finish your goodbye, do not start anything new' };
+    return { ok: true, ending: true, note: 'wrapping up - finish your goodbye, do not start anything new' };
   }
   const method = HANDLERS[name];
   if (!method) return { ok: false, error: `no such tool: ${name}` };

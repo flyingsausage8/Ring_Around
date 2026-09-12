@@ -76,7 +76,15 @@ function checkAzure() {
     // with a contractor who is about to give us a price.
     const rt = new Realtime({ instructions: 'preflight', tools: TOOLS, onClose: () => done(false, 'socket closed before session.updated') });
     rt.connect();
-    rt.whenReady(() => done(true, `session accepted audio/pcmu + semantic_vad + ${TOOLS.length} tools`));
+    rt.whenReady(() => {
+      // Azure will accept a session and silently ignore a setting inside it.
+      // Eagerness decides whether a "mm-hm" is treated as a whole turn, so if
+      // it did not stick, she will talk over people and nothing would say why.
+      const td = rt.turnDetection;
+      if (td?.type !== 'semantic_vad') return done(false, `turn detection came back as ${td?.type || 'nothing'}, not semantic_vad`);
+      if (td?.eagerness !== cfg.eagerness) return done(false, `asked for eagerness=${cfg.eagerness}, Azure kept ${td?.eagerness}`);
+      done(true, `session accepted audio/pcmu + semantic_vad eagerness=${td.eagerness} + ${TOOLS.length} tools`);
+    });
     setTimeout(() => done(false, 'timed out after 15s'), 15000);
   });
 }

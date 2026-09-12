@@ -1,0 +1,477 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Ring Around</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { font: 15px/1.55 system-ui, -apple-system, Segoe UI, sans-serif; margin: 0; padding: 28px 32px 60px; background: #101216; color: #e8eaed; }
+  h1 { font-size: 22px; margin: 0 0 2px; }
+  .sub { color: #9aa0a6; font-size: 13px; margin-bottom: 26px; }
+  .banner { display: none; background: #3a1d1d; border: 1px solid #a03535; color: #ffb4b4; padding: 10px 14px; border-radius: 6px; margin-bottom: 18px; font-size: 13px; }
+
+  .step { margin-bottom: 28px; opacity: 1; transition: opacity .2s; }
+  .step.off { opacity: .35; pointer-events: none; }
+  .steplabel { font-size: 12px; letter-spacing: .09em; text-transform: uppercase; color: #8ab4f8; margin-bottom: 8px; }
+
+  .card { background: #1a1d22; border: 1px solid #2a2e35; border-radius: 10px; padding: 18px 20px; max-width: 760px; }
+  .card dl { display: grid; grid-template-columns: 130px 1fr; gap: 6px 14px; margin: 0; }
+  .card dt { color: #9aa0a6; font-size: 13px; }
+  .card dd { margin: 0; }
+
+  button { font: inherit; padding: 10px 18px; border-radius: 8px; border: 1px solid #3c4043; background: #24272c; color: #e8eaed; cursor: pointer; margin: 12px 8px 0 0; }
+  button:hover:not(:disabled) { background: #2f333a; }
+  button:disabled { opacity: .3; cursor: not-allowed; }
+  button.go { background: #18653a; border-color: #1d7a45; }
+  button.danger { background: #9d1f1f; border-color: #b32828; }
+  button.big { font-size: 16px; padding: 12px 26px; }
+
+  .pill { display: inline-block; padding: 2px 10px; border-radius: 20px; background: #24272c; font-size: 12px; color: #c8ccd1; }
+  .pill.live { background: #18653a; color: #d7f5e4; }
+  .pill.stopping { background: #9d1f1f; }
+
+  table.shops { border-collapse: collapse; width: 100%; max-width: 760px; font-size: 13px; }
+  table.shops th, table.shops td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #23262c; }
+  table.shops th { color: #9aa0a6; font-weight: 500; }
+
+  .row { border: 1px solid #2a2e35; border-radius: 10px; margin-bottom: 10px; background: #1a1d22; overflow: hidden; }
+  .row.active { border-color: #1d7a45; }
+  .rowhead { display: flex; align-items: center; gap: 12px; padding: 12px 16px; }
+  .rowhead .n { color: #6f757d; font-variant-numeric: tabular-nums; }
+  .rowhead .name { font-weight: 600; }
+  .rowhead .phone { color: #9aa0a6; font-size: 13px; }
+  .rowhead .right { margin-left: auto; display: flex; gap: 10px; align-items: center; }
+
+  .feed { border-top: 1px solid #2a2e35; padding: 10px 16px 14px; max-height: 320px; overflow-y: auto; font-size: 13px; }
+  .feed.done { max-height: 220px; opacity: .82; }
+  .ln { margin: 5px 0; display: flex; gap: 10px; }
+  .ln .t { color: #5f656d; font-variant-numeric: tabular-nums; min-width: 46px; text-align: right; }
+  .ln.agent .w { color: #a8c7fa; }
+  .ln.them .w { color: #e8eaed; }
+  .ln.tool .w { color: #f5c77e; font-size: 12px; }
+  .ln.system .w { color: #8b9096; font-style: italic; font-size: 12px; }
+  .ln .unheard { color: #f28b82; font-size: 11px; margin-left: 6px; }
+
+  .results { border-top: 1px solid #2a2e35; padding: 10px 16px 14px; display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px 18px; font-size: 13px; }
+  .results .k { color: #9aa0a6; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; }
+  .results .v { margin-top: 2px; }
+  .results .v.none { color: #5f656d; }
+  .err { color: #f28b82; }
+  .ok { color: #81c995; }
+  .note { color: #9aa0a6; font-size: 13px; margin-left: 6px; }
+</style>
+
+<h1>Ring Around</h1>
+<div class="sub">One call at a time. Pause finishes the call it is on; Stop hangs up now.</div>
+<div id="banner" class="banner"></div>
+
+<!-- Step 1 -->
+<div class="step" id="step1">
+  <div class="steplabel">Step 1 &middot; The job</div>
+  <div class="card">
+    <dl id="jobcard"></dl>
+    <button id="begin" class="go big">Start</button>
+    <span class="note" id="beginNote"></span>
+  </div>
+</div>
+
+<!-- Step 2 -->
+<div class="step off" id="step2">
+  <div class="steplabel">Step 2 &middot; Shops found <span class="note">ranked by stars &times; (1 + log10(reviews)/10)</span></div>
+  <table class="shops">
+    <thead><tr><th>#</th><th>Company</th><th>Phone</th><th>Rating</th><th>Reviews</th><th>Score</th></tr></thead>
+    <tbody id="shops"><tr><td colspan="6" class="note">waiting</td></tr></tbody>
+  </table>
+</div>
+
+<!-- Step 3 -->
+<div class="step off" id="step3">
+  <div class="steplabel">Step 3 &middot; The queue <span class="pill" id="state">idle</span> <span class="note" id="live">connecting…</span></div>
+  <div>
+    <button id="startShops" class="go">Start (call contractors)</button>
+    <button id="startPhone" class="go">Start (call my phone)</button>
+    <button id="pause">Pause</button>
+    <button id="stop" class="danger">Stop</button>
+    <span class="note" id="queueNote"></span>
+  </div>
+  <div id="rows" style="margin-top:16px"></div>
+</div>
+
+<script>
+// Everything lives inside this function on purpose. A top-level "var" in an
+// inline script becomes a property of window, and window already has a
+// "status" and a "history" - assigning to those does not do what you expect,
+// it quietly coerces or ignores, and the page then misbehaves with no error.
+// Cost us a debugging session. Nothing in here touches the global object.
+(function () {
+  var shops = [];           // what discovery found
+  var queueView = null;        // the queue as the server last described it
+  var feeds = {};           // transcript id -> lines, for calls that have finished
+  var liveFeed = [];        // the call happening right now; one at a time, always
+  var liveKey = null;       // which row liveFeed belongs to
+  var pendingNote = false;  // a message is showing that polling must not overwrite
+  var asked = {};           // transcript ids already fetched from disk
+  var pastCalls = [];         // calls finished on an earlier run, rebuilt from disk
+
+  function $(id) { return document.getElementById(id); }
+  function esc(s) { return String(s == null ? '' : s).replace(/[<>&"]/g, function (c) { return { '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]; }); }
+
+  // A panel that breaks silently is the thing we are trying to avoid, so any
+  // error the page throws gets said out loud rather than left in a console.
+  window.onerror = function (msg, src, line) {
+    var b = $('banner');
+    b.style.display = 'block';
+    b.textContent = 'the page hit an error: ' + msg + ' (line ' + line + ')';
+  };
+  function post(url, body) {
+    return fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}) }).then(function (r) { return r.json(); });
+  }
+
+  // ---- Step 1: the job, straight from the server's config ----
+  fetch('/api/job').then(function (r) { return r.json(); }).then(function (d) {
+    var j = d.job || {};
+    var rows = [
+      ['Appliance', [j.brand, 'cooktop'].filter(Boolean).join(' ')],
+      ['Type', j.fuel || 'not known'],
+      ['Age', j.age || 'not known'],
+      ['Problem', j.issue || ''],
+      ['Area', [j.area, j.zip].filter(Boolean).join(' ')],
+      ['Free', j.availability || ''],
+      ['Calling as', d.agent + ', for ' + (j.client || '')]
+    ];
+    $('jobcard').innerHTML = rows.map(function (r) {
+      return '<dt>' + esc(r[0]) + '</dt><dd>' + esc(r[1]) + '</dd>';
+    }).join('');
+  });
+
+  // Start runs discovery on its own, then opens the queue. It does not dial -
+  // dialling is always a separate, deliberate press.
+  $('begin').onclick = function () {
+    $('begin').disabled = true;
+    $('beginNote').textContent = 'searching Redmond…';
+    $('step2').classList.remove('off');
+    post('/api/discover', { limit: 10 }).then(function (r) {
+      $('begin').disabled = false;
+      if (!r.ok) { $('beginNote').innerHTML = '<span class="err">' + esc(r.error) + '</span>'; return; }
+      $('beginNote').textContent = '';
+      shops = r.contractors;
+      drawShops();
+      $('step3').classList.remove('off');
+      drawRows();
+    });
+  };
+
+  function drawShops() {
+    if (!shops.length) { $('shops').innerHTML = '<tr><td colspan="6" class="note">nothing found</td></tr>'; return; }
+    $('shops').innerHTML = shops.map(function (c, i) {
+      return '<tr><td>' + (i + 1) + '</td><td>' + esc(c.name) + '</td><td>' + esc(c.phone) +
+        '</td><td>' + (c.rating != null ? c.rating + '★' : '') + '</td><td>' + (c.reviews != null ? c.reviews : '') +
+        '</td><td>' + (c.score ? c.score.toFixed(2) : '') + '</td></tr>';
+    }).join('');
+  }
+
+  // ---- Step 3: one row per call. The finished rows keep their own answers,
+  // so the list itself is the comparison. ----
+  //
+  // What to show, in order of how much it is worth: the run happening now, the
+  // shops waiting to be called, or - failing both - the calls already made on
+  // a previous run, read back off disk.
+  function drawRows() {
+    var items;
+    if (queueView && queueView.items && queueView.items.length) items = queueView.items;
+    else if (shops.length) items = shops.map(function (c) { return { name: c.name, phone: c.phone, status: 'waiting' }; });
+    else items = pastCalls;
+
+    if (!items.length) { $('rows').innerHTML = '<div class="note">nothing queued</div>'; return; }
+
+    $('rows').innerHTML = items.map(function (x, i) {
+      var active = x.status === 'calling';
+      var lines = active ? liveFeed : linesFor(x);
+      var right = active
+        ? '<span class="pill live">on the phone</span>'
+        : x.error ? '<span class="err">' + esc(x.error) + '</span>'
+        : x.outcome ? '<span class="ok">' + esc(x.outcome) + '</span>'
+        : '<span class="note">' + esc(x.status) + '</span>';
+      var dur = x.durationSeconds ? '<span class="note">' + x.durationSeconds + 's</span>' : '';
+
+      // Live, the transcript is the whole point. Afterwards the answers come
+      // first, with the words kept underneath so a number can be checked
+      // against what was actually said.
+      var body = '';
+      if (active) {
+        body = '<div class="feed" id="feed">' + renderLines(lines) + '</div>';
+      } else {
+        if (x.findings) body += '<div class="results">' + renderFindings(x.findings) + '</div>';
+        if (lines && lines.length) body += '<div class="feed done">' + renderLines(lines) + '</div>';
+        // Nothing on disk is a real answer, not a reason to sit on "loading"
+        // forever. The oldest calls were made before transcripts were saved.
+        else if (x.files && feeds[x.files]) body += '<div class="note">no transcript was saved for this call</div>';
+        else if (x.files) body += '<div class="note">loading the transcript…</div>';
+      }
+
+      var when = x.startedAt ? '<span class="note">' + esc(clock(x.startedAt)) + '</span>' : '';
+
+      return '<div class="row ' + (active ? 'active' : '') + '">' +
+        '<div class="rowhead"><span class="n">' + (i + 1) + '</span><span class="name">' + esc(x.name) +
+        '</span><span class="phone">' + esc(x.phone) + '</span><span class="right">' + when + dur + right + '</span></div>' +
+        body + '</div>';
+    }).join('');
+
+    var feed = $('feed');
+    if (feed) feed.scrollTop = feed.scrollHeight;
+  }
+
+  // Seven rows all called "my phone" are impossible to tell apart without it.
+  function clock(iso) {
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return '';
+    return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  }
+
+  // What was said on a call that has ended: whatever the stream gave us, or
+  // failing that the copy on disk. The disk copy is the one that survives a
+  // reload, so it is always worth asking for.
+  function linesFor(x) {
+    var id = x.files;
+    if (!id) return null;
+    if (feeds[id]) return feeds[id];
+    if (!asked[id]) {
+      asked[id] = true;
+      fetch('/api/transcript?id=' + encodeURIComponent(id))
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          feeds[id] = (d.ok && d.transcript && d.transcript.lines) ? d.transcript.lines : [];
+          drawRows();
+        })
+        .catch(function () { feeds[id] = []; });
+    }
+    return null;
+  }
+
+  function renderLines(lines) {
+    if (!lines || !lines.length) return '<div class="note">connecting…</div>';
+    return lines.map(function (l) {
+      var who = l.who === 'them' ? 'them' : l.who === 'agent' ? 'agent' : l.who === 'tool' ? 'tool' : 'system';
+      var text;
+      if (who === 'tool') text = 'noted ' + l.tool + (l.ok ? '' : ' — refused: ' + l.error);
+      else if (who === 'them') text = l.blank ? '(nothing we could make out)' : l.text;
+      else text = l.text;
+      var unheard = (who === 'agent' && l.heardPct != null && l.heardPct < 99)
+        ? '<span class="unheard">they heard ' + l.heardPct + '%</span>' : '';
+      return '<div class="ln ' + who + '"><span class="t">' + l.at + 's</span><span class="w">' +
+        esc(text) + unheard + '</span></div>';
+    }).join('');
+  }
+
+  function renderFindings(f) {
+    var slots = f.slots || [];
+    var q = f.quote, c = f.callout;
+    var declined = (f.declined || []).map(function (d) { return d.topic; });
+    var wouldNot = function (topic) { return declined.indexOf(topic) >= 0 ? 'would not say' : null; };
+
+    var cells = [
+      ['Quote', q ? money(q.lowUsd, q.highUsd) + (q.overBudget ? ' (over budget)' : '') : wouldNot('quote')],
+      ['Call-out fee', c ? (c.feeUsd === 0 ? 'none' : '$' + c.feeUsd) : wouldNot('callout')],
+      ['Fee off the bill?', c && c.waivedIfRepaired != null ? (c.waivedIfRepaired ? 'yes' : 'no') : null],
+      ['Job length', dur(f.jobDuration)],
+      ['Visit length', dur(f.visitDuration)],
+      ['Soonest', f.leadTime ? f.leadTime.soonest : null],
+      ['Slot 1', slots[0] ? slotText(slots[0]) : null],
+      ['Slot 2', slots[1] ? slotText(slots[1]) : null],
+      ['Covers us?', f.serviceArea == null ? null : (f.serviceArea.covers ? 'yes' : 'no')],
+      ['How it went', f.outcome ? (f.outcome.summary || f.outcome.outcome) : null]
+    ];
+    return cells.map(function (cell) {
+      var v = cell[1];
+      return '<div><div class="k">' + esc(cell[0]) + '</div><div class="v ' + (v ? '' : 'none') + '">' +
+        esc(v || '—') + '</div></div>';
+    }).join('');
+  }
+
+  function money(low, high) {
+    if (low == null && high == null) return null;
+    if (high != null && high !== low) return '$' + low + '–$' + high;
+    return '$' + (low != null ? low : high);
+  }
+
+  function dur(d) {
+    if (!d) return null;
+    if (d.maxMinutes != null && d.maxMinutes !== d.minMinutes) return d.minMinutes + '–' + d.maxMinutes + ' min';
+    return (d.minMinutes != null ? d.minMinutes : d.maxMinutes) + ' min';
+  }
+
+  function slotText(s) {
+    return [s.day, s.date, s.startTime + '–' + s.endTime].filter(Boolean).join(' ');
+  }
+
+  // ---- the live feed ----
+  // SSE carries the transcript, which has to arrive as it is spoken. But a
+  // stream can die quietly - a server restart, a sleeping laptop - and a
+  // control panel that has silently stopped updating is worse than no panel
+  // at all. So state is also polled, and the two cannot disagree for long.
+  var streamOk = false;
+  var es = null;
+
+  function connect() {
+    if (es) try { es.close(); } catch (e) {}
+    es = new EventSource('/api/events');
+
+    es.onopen = function () {
+      streamOk = true;
+      mark();
+    };
+
+    es.onerror = function () {
+      streamOk = false;
+      mark();
+    };
+
+    es.addEventListener('queue', function (e) {
+      apply(JSON.parse(e.data));
+    });
+
+    es.addEventListener('contractors', function (e) {
+      shops = JSON.parse(e.data).contractors;
+      drawShops();
+    });
+
+    es.addEventListener('line', function (e) {
+      liveFeed.push(JSON.parse(e.data).line);
+      drawRows();
+    });
+
+    es.addEventListener('call', function () { refresh(); });
+  }
+
+  function mark() {
+    $('live').textContent = streamOk ? 'live' : 'reconnecting…';
+    $('live').className = 'note' + (streamOk ? '' : ' err');
+  }
+
+  // The server always reports both queues. Only one may own the line, so
+  // picking the one to show is a single rule used everywhere - the stream and
+  // the poller must never disagree about which queue the page is looking at.
+  function pick(s) {
+    if (!s || !s.contractors) return null;
+    if (s.contractors.running) return s.contractors;
+    if (s.phone.running) return s.phone;
+    if (s.contractors.total) return s.contractors;
+    return s.phone;
+  }
+
+  function apply(full) {
+    var s = pick(full);
+    if (!s) return;
+    queueView = s;
+    if (s.total) $('step3').classList.remove('off');
+
+    // One call at a time, so the live lines can only belong to one row. When
+    // that row finishes, its words are filed under the transcript on disk and
+    // the live feed starts empty for the next call.
+    var calling = (s.items || []).filter(function (x) { return x.status === 'calling'; })[0];
+    if (calling) {
+      liveKey = calling.name;
+    } else if (liveKey) {
+      var was = (s.items || []).filter(function (x) { return x.name === liveKey; })[0];
+      if (was && was.files && liveFeed.length) feeds[was.files] = liveFeed;
+      liveKey = null;
+      liveFeed = [];
+      // That call is now on disk with its notes. Pick it up so it survives a
+      // reload even if this tab is closed straight after.
+      loadHistory();
+    }
+
+    var el = $('state');
+    el.textContent = s.state;
+    el.className = 'pill' + (s.state === 'in_call' || s.state === 'dialling' ? ' live' : s.state === 'stopping' ? ' stopping' : '');
+    if (!pendingNote) {
+      $('queueNote').textContent = s.total ? s.done + ' of ' + s.total + ' called' : '';
+    }
+    buttons();
+    drawRows();
+  }
+
+  // The one source of truth when the stream cannot be trusted.
+  // Calls made before this page was opened, or before the server last
+  // restarted. Without this, finishing a call and reloading loses everything.
+  function loadHistory() {
+    return fetch('/api/history')
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        pastCalls = (d && d.calls) || [];
+        if (pastCalls.length) $('step3').classList.remove('off');
+        drawRows();
+      })
+      .catch(function () {});
+  }
+
+  function refresh() {
+    return fetch('/api/status')
+      .then(function (r) { return r.json(); })
+      .then(apply)
+      .catch(function () {});
+  }
+
+  function buttons() {
+    var running = queueView && queueView.running;
+    $('startShops').disabled = running || !shops.length;
+    $('startPhone').disabled = running;
+    $('pause').disabled = !running;
+    $('stop').disabled = !running;
+  }
+
+  $('startShops').onclick = function () {
+    feeds = {};
+    go({ mode: 'contractors', targets: shops });
+  };
+  $('startPhone').onclick = function () {
+    feeds = {};
+    $('step3').classList.remove('off');
+    go({ mode: 'phone' });
+  };
+
+  // Press and something changes on screen immediately. Waiting for a round
+  // trip to say anything is how a working button looks broken.
+  function go(body) {
+    pendingNote = true;
+    $('queueNote').textContent = 'checking the line…';
+    buttonsBusy();
+    post('/api/start', body)
+      .then(function (r) {
+        pendingNote = false;
+        if (r && r.ok === false) {
+          $('queueNote').innerHTML = '<span class="err">' + esc(r.error) + '</span>';
+          pendingNote = true;
+          setTimeout(function () { pendingNote = false; }, 6000);
+        }
+        return refresh();
+      })
+      .catch(function (err) {
+        pendingNote = false;
+        $('queueNote').innerHTML = '<span class="err">could not reach the server: ' + esc(err.message) + '</span>';
+      });
+  }
+
+  function buttonsBusy() {
+    $('startShops').disabled = true;
+    $('startPhone').disabled = true;
+    $('pause').disabled = false;
+    $('stop').disabled = false;
+  }
+
+  $('pause').onclick = function () { post('/api/pause').then(refresh); };
+  $('stop').onclick = function () { post('/api/stop').then(refresh); };
+
+  // Last, deliberately. Everything above is wiring; if opening the stream
+  // throws, the buttons are already live and the page still works by polling.
+  $('startShops').disabled = true;
+  $('startPhone').disabled = false;
+  buttons();
+  refresh();
+  loadHistory();
+  setInterval(refresh, 1500);
+  connect();
+  // A stream that has been down for a moment gets a fresh socket rather than
+  // waiting on the browser to feel like retrying.
+  setInterval(function () { if (!streamOk) connect(); }, 5000);
+})();
+</script>

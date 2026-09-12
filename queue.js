@@ -190,6 +190,11 @@ export class CallQueue {
         durationSeconds: x.durationSeconds ?? null,
         error: x.error || null,
         files: x.files || null,
+        rating: x.rating,
+        reviews: x.reviews,
+        // The finished rows ARE the comparison, so they have to carry their
+        // own answers with them. There is no separate results page.
+        findings: x.findings || null,
       })),
     };
   }

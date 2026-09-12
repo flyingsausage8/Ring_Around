@@ -9,6 +9,10 @@ import * as log from './log.js';
 
 const DAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
 
+// Two weeks. Long enough for "it could be a couple of days" to be recorded
+// honestly, short enough that a typo like 99999 is still caught.
+const MAX_MINUTES = 60 * 24 * 14;
+
 export class Findings {
   constructor(job = cfg.job) {
     this.job = job;
@@ -24,6 +28,7 @@ export class Findings {
     this.hangup = null;        // why the agent ended the call
     this.badPickup = null;     // a machine answered, or nobody did
     this.callerTurns = 0;      // how many times they have actually said something
+    this.agentTurns = 0;       // how many of her own turns have finished
     this.lastCallerEmpty = true; // did the last thing we transcribed come back blank
   }
 
@@ -34,6 +39,19 @@ export class Findings {
     this.lastCallerEmpty = said.length === 0;
     if (!this.lastCallerEmpty) this.callerTurns++;
     return this.callerTurns;
+  }
+
+  // Counted when one of her own turns finishes. The first one is the greeting,
+  // which asks nothing about the job - so until a second one has finished, she
+  // has not asked a question yet, whatever she thinks she heard the answer to.
+  noteAgentTurn(text) {
+    if (String(text ?? '').trim()) this.agentTurns++;
+    return this.agentTurns;
+  }
+
+  // Has she finished asking anything beyond hello?
+  askedSomething() {
+    return this.agentTurns >= 2;
   }
 
   // Some decisions end the call. Those must not rest on a transcript that came
@@ -51,12 +69,47 @@ export class Findings {
 
   #minutes(v) {
     const n = Number(v);
-    return Number.isFinite(n) && n > 0 && n <= 60 * 24 ? n : null;
+    return Number.isFinite(n) && n > 0 && n <= MAX_MINUTES ? n : null;
+  }
+
+  // Durations, in one place, because the failure mode here is quiet and nasty.
+  // A repair really can take two days, and the old ceiling of 24 hours turned
+  // "an hour to maybe two days" into a flat "60 minutes" without a word of
+  // complaint - the maximum failed to parse and silently became the minimum.
+  // A number we cannot use is now refused out loud rather than replaced with
+  // a wrong one.
+  #duration(minMinutes, maxMinutes, theirWords) {
+    const min = this.#minutes(minMinutes);
+    if (min === null) {
+      return { ok: false, error: `need the shortest time in minutes, between 1 and ${MAX_MINUTES}` };
+    }
+    let max = min;
+    if (maxMinutes !== null && maxMinutes !== undefined && maxMinutes !== '') {
+      max = this.#minutes(maxMinutes);
+      if (max === null) {
+        return { ok: false, error: `need the longest time in minutes, between 1 and ${MAX_MINUTES}. Two days is 2880.` };
+      }
+      if (max < min) {
+        return { ok: false, error: 'the longest time cannot be shorter than the shortest time - check which way round they said it' };
+      }
+    }
+    return { ok: true, value: { minMinutes: min, maxMinutes: max, theirWords } };
   }
 
   // --- tool handlers -------------------------------------------------------
 
   noteServiceArea({ covers, theirWords }) {
+    // She recorded "yes, they cover it" off a bare "Okay." - in the same breath
+    // as asking the question, before the words had even reached the caller. The
+    // greeting asks nothing about the job, so until a second turn of hers has
+    // finished, there is no question for this to be the answer to.
+    if (!this.askedSomething()) {
+      return {
+        ok: false,
+        error:
+          'you have not finished asking them yet. Ask whether they cover the area, let them answer, and record it after that.',
+      };
+    }
     // "They do not cover it" ends the call, so it is the one answer we refuse
     // to take on faith. If the last thing we transcribed was blank, they did
     // not answer - the line was quiet, or it was a cough, or they had not
@@ -85,10 +138,9 @@ export class Findings {
   }
 
   noteJobDuration({ minMinutes, maxMinutes, theirWords }) {
-    const min = this.#minutes(minMinutes);
-    const max = this.#minutes(maxMinutes) ?? min;
-    if (min === null && max === null) return { ok: false, error: 'need minutes as a number' };
-    this.jobDuration = { minMinutes: min, maxMinutes: max, theirWords };
+    const r = this.#duration(minMinutes, maxMinutes, theirWords);
+    if (!r.ok) return r;
+    this.jobDuration = r.value;
     return { ok: true };
   }
 
@@ -104,10 +156,9 @@ export class Findings {
   }
 
   noteVisitDuration({ minMinutes, maxMinutes, theirWords }) {
-    const min = this.#minutes(minMinutes);
-    const max = this.#minutes(maxMinutes) ?? min;
-    if (min === null && max === null) return { ok: false, error: 'need minutes as a number' };
-    this.visitDuration = { minMinutes: min, maxMinutes: max, theirWords };
+    const r = this.#duration(minMinutes, maxMinutes, theirWords);
+    if (!r.ok) return r;
+    this.visitDuration = r.value;
     return { ok: true };
   }
 
@@ -167,7 +218,27 @@ export class Findings {
     if (this.slots.some((s) => s.day === d && s.startMin === start && s.endMin === end)) {
       return { ok: true, note: 'already had that one', slots: this.slots.length };
     }
-    this.slots.push({ day: d, date: iso, startTime, endTime, startMin: start, endMin: end, theirWords });
+
+    // A correction, not a second appointment. Nobody offers two overlapping
+    // visits on the same date for the same job - when they say "sorry, one to
+    // two" after "one to three", the later one replaces the earlier. Comparing
+    // clock values on the same date; no reading of what was said.
+    const clash = this.slots.findIndex(
+      (s) => s.day === d && s.date === iso && start < s.endMin && end > s.startMin,
+    );
+    const slot = { day: d, date: iso, startTime, endTime, startMin: start, endMin: end, theirWords };
+    if (clash >= 0) {
+      const old = this.slots[clash];
+      this.slots[clash] = slot;
+      return {
+        ok: true,
+        note: `replaced the earlier ${fmt(old.startMin)}-${fmt(old.endMin)} on that date with this one`,
+        slots: this.slots.length,
+        stillNeeded: Math.max(0, 2 - this.slots.length),
+      };
+    }
+
+    this.slots.push(slot);
     return { ok: true, slots: this.slots.length, stillNeeded: Math.max(0, 2 - this.slots.length) };
   }
 

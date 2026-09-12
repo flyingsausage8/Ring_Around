@@ -26,6 +26,34 @@ export function hasPending() {
   return !!pending;
 }
 
+// Ask the outside world whether it can still see us. The free tunnels this
+// runs behind die several times a day and take a new hostname with them, and
+// nothing about that failure is visible from inside this process.
+export async function assertReachable() {
+  const url = `https://${cfg.publicHost}/twiml`;
+  let res;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      signal: AbortSignal.timeout(8000),
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: 'CallSid=preflight',
+    });
+  } catch (err) {
+    log.fail('TUNNEL', `${cfg.publicHost} is unreachable: ${err.message}`);
+    throw new Error(`the tunnel is down - Twilio cannot reach ${cfg.publicHost}. Restart cloudflared and update PUBLIC_HOST.`);
+  }
+  if (!res.ok) {
+    log.fail('TUNNEL', `${url} returned ${res.status}`);
+    throw new Error(`the tunnel answered ${res.status}, not 200 - Twilio would hear an application error. Restart cloudflared and update PUBLIC_HOST.`);
+  }
+  const body = await res.text();
+  if (!body.includes('<Stream')) {
+    throw new Error('the tunnel reached something, but it was not this server');
+  }
+  log.stage('TUNNEL', `${cfg.publicHost} answers - safe to dial`);
+}
+
 export function makeDialer({ client = null, toOverride = null } = {}) {
   const twilioClient = client || twilio(cfg.twilioSid, cfg.twilioToken);
 
@@ -34,14 +62,20 @@ export function makeDialer({ client = null, toOverride = null } = {}) {
     // queue checked at load time; this catches anything that changed since.
     assertProvenance(item);
 
+    if (!cfg.publicHost) throw new Error('PUBLIC_HOST is empty - Twilio has nowhere to call back');
+
+    // Twilio has to be able to fetch /twiml from the outside world. When the
+    // tunnel is dead the call still connects and the caller hears "an
+    // application error has occurred" - which looks like the agent broke, but
+    // is really the door being shut. Check the door before ringing anyone.
+    await assertReachable();
+
     // Phone mode: everything is dialled to my own number instead, so the
     // agent can be rehearsed against a real line without ringing a business.
     const to = toOverride || item.phone;
     if (toOverride && to !== cfg.to) {
       throw new Error('phone mode may only dial MY_VERIFIED_NUMBER');
     }
-
-    if (!cfg.publicHost) throw new Error('PUBLIC_HOST is empty - Twilio has nowhere to call back');
 
     let attach;
     const attached = new Promise((resolve) => {
@@ -58,6 +92,24 @@ export function makeDialer({ client = null, toOverride = null } = {}) {
         statusCallback: `https://${cfg.publicHost}/status`,
         statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
         timeout: cfg.ringSeconds,
+        // Ask Twilio who picked up. Without this a voicemail greeting looks
+        // exactly like a person who has gone quiet, and the agent talks to an
+        // answering machine for a full minute.
+        //
+        // 'Enable' answers one question - human or machine - and answers it as
+        // soon as it knows. 'DetectMessageEnd' is the other mode: it waits for
+        // a machine to finish its outgoing greeting so you can leave a message
+        // after the beep. We never leave a message, so that mode bought us
+        // nothing and cost us thirty seconds of listening, which is how a
+        // verdict once landed in the middle of a real conversation and hung up
+        // on the man we were talking to.
+        machineDetection: 'Enable',
+        // And a hard ceiling, so a verdict can never arrive late enough to
+        // contradict a conversation that is already under way.
+        machineDetectionTimeout: 5,
+        asyncAmd: 'true',
+        asyncAmdStatusCallback: `https://${cfg.publicHost}/amd`,
+        asyncAmdStatusCallbackMethod: 'POST',
       });
     } catch (err) {
       pending = null;

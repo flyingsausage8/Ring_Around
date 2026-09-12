@@ -17,7 +17,7 @@ function check(name, got, want) {
 
 // Stands in for the Azure socket: records what we send, never opens anything.
 function harness() {
-  const rt = new Realtime({ instructions: 'test' });
+  const rt = new Realtime({ instructions: 'test', greetingDelayMs: 0 });
   const sent = [];
   rt.ws = { readyState: 1, send: (s) => sent.push(JSON.parse(s)) };
   rt.ready = true;
@@ -27,6 +27,24 @@ function harness() {
 }
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+console.log('\nshe lets them say who they are first:');
+{
+  // A business answers with a sentence - "Appliance Repair, this is Dave".
+  // Opening her mouth the instant the line connects talks straight over it.
+  const rt = new Realtime({ instructions: 'test', greetingDelayMs: 120 });
+  const sent = [];
+  rt.ws = { readyState: 1, send: (s) => sent.push(JSON.parse(s)) };
+  rt.ready = true;
+  const greetings = () => sent.filter((m) => m.type === 'response.create').length;
+
+  rt.speakFirst('say hi and disclose');
+  check('nothing said the moment the line opens', greetings(), 0);
+  await wait(60);
+  check('...still holding halfway through the pause', greetings(), 0);
+  await wait(150);
+  check('...then she introduces herself', greetings(), 1);
+}
 
 console.log('\ngreeting cancelled by line noise, no audio produced:');
 {

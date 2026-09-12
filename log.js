@@ -22,6 +22,7 @@ export const STAGES = [
   'HTTP_LISTEN',          // our server is up
   'TUNNEL',               // public host answers
   'CALL_CREATE',          // we asked Twilio to dial
+  'AMD',                  // Twilio's verdict on who picked up
   'TWILIO_FETCH_TWIML',   // Twilio asked us what to say
   'TWIML_SENT',           // we answered with a <Stream>
   'TWILIO_WS_OPEN',       // Twilio opened the media socket

@@ -7,10 +7,11 @@ import * as log from './log.js';
 const PCMU = { type: 'audio/pcmu' };
 
 export class Realtime {
-  constructor({ tag = 'azure', instructions = '', tools = [], onToolCall, onCallerTranscript, onAudio, onBargeIn, onClose, onResponseStart, onTranscript } = {}) {
+  constructor({ tag = 'azure', instructions = '', tools = [], greetingDelayMs = cfg.greetingDelayMs, onToolCall, onCallerTranscript, onAudio, onBargeIn, onClose, onResponseStart, onTranscript } = {}) {
     this.tag = tag;
     this.instructions = instructions;
     this.tools = tools;
+    this.greetingDelayMs = greetingDelayMs;
     this.onToolCall = onToolCall || (() => ({ ok: false, error: 'no tool handler wired' }));
     this.onCallerTranscript = onCallerTranscript || (() => {});
     this.onAudio = onAudio || (() => {});
@@ -31,7 +32,9 @@ export class Realtime {
     this.audioFramesThisResponse = 0;
     this.currentResponseId = null;
     this.pendingTranscript = null;
-    this.toolFollowUp = false;   // a tool ran, so the model owes us a reply
+    this.toolFollowUp = false;   // a tool ran, so the model may owe us a reply
+    this.toolResultWasNews = false;  // ...and that reply is news, not an echo
+    this.toolEndedTheCall = false;   // ...or the call is wrapping up, so say nothing more
     this.toolCallsThisResponse = 0;
   }
 
@@ -114,6 +117,10 @@ export class Realtime {
         break;
 
       case 'session.updated':
+        // Keep what Azure echoed back. A turn-detection setting it quietly
+        // drops would change how she behaves on every call while looking
+        // perfectly fine from here, so preflight checks this.
+        this.turnDetection = ev.session?.audio?.input?.turn_detection ?? ev.session?.turn_detection ?? null;
         if (!this.ready) {
           this.ready = true;
           log.stage('AZURE_SESSION_READY');
@@ -180,6 +187,15 @@ export class Realtime {
         this.onCallerTranscript(ev.transcript ?? '');
         break;
 
+      // A turn that could not be transcribed still counts as a turn: the model
+      // has already been handed it and will answer. If it is not written down
+      // the transcript shows a reply that came from nowhere, which is exactly
+      // what made this hard to find.
+      case 'conversation.item.input_audio_transcription.failed':
+        log.warn('caller said', `transcription failed: ${ev.error?.message || 'no reason given'}`);
+        this.onCallerTranscript('');
+        break;
+
       // What the model produced. NOT what the caller heard - that only becomes
       // known once Twilio marks the audio as played. See playback.js.
       case 'response.output_audio_transcript.done':
@@ -219,17 +235,32 @@ export class Realtime {
         // otherwise she keeps talking out of Twilio's buffer after she has
         // stopped being produced.
         if (cancelled) this.onBargeIn();
+        this.currentResponseId = null;
         this.onTranscript(ev.response?.id || null, this.pendingTranscript ?? '', status);
         this.pendingTranscript = null;
 
-        // A tool ran during that response. The slot may have been refused, or
-        // the price may be over budget, and she needs to say so out loud. Now
-        // that the response is finished, it is safe to ask for another.
+        // A tool ran during that response. Ask for another reply only when
+        // there is a reason to open her mouth again:
+        //
+        //   - the note was refused, or the price is over budget, so the result
+        //     is news she has to pass on; or
+        //   - she wrote the note without saying a word, so staying quiet now
+        //     would just be dead air.
+        //
+        // If she already spoke and the note went in cleanly, she has answered.
+        // Asking again is what made her talk over people 0.4s after finishing.
         // Skipped when cancelled - the caller is mid-sentence and semantic VAD
-        // will start a reply on its own.
+        // will start a reply on its own. Skipped when the call is ending.
         if (this.toolFollowUp) {
+          const spoke = this.audioFramesThisResponse > 0;
+          const news = this.toolResultWasNews;
+          const ending = this.toolEndedTheCall;
           this.toolFollowUp = false;
-          if (!cancelled) setTimeout(() => this.#raw({ type: 'response.create' }), 0);
+          this.toolResultWasNews = false;
+          this.toolEndedTheCall = false;
+          if (cancelled || ending) break;
+          if (news || !spoke) setTimeout(() => this.#raw({ type: 'response.create' }), 0);
+          else log.info('azure', 'note went in cleanly and she already spoke - not asking for another reply');
         }
         break;
       }
@@ -273,6 +304,10 @@ export class Realtime {
       },
     });
     this.toolFollowUp = true;
+    // Whether the answer is something she has to say out loud, rather than a
+    // silent acknowledgement. Shape only - never a look at anyone's words.
+    if (result?.ok === false || result?.overBudget === true) this.toolResultWasNews = true;
+    if (result?.ending === true) this.toolEndedTheCall = true;
   }
 
   #raw(obj) {
@@ -294,7 +329,12 @@ export class Realtime {
     this.greetingPrompt = prompt;
     this.greetingPending = true;
     this.greetingAttempts = 0;
-    this.whenReady(() => this.#createGreeting());
+    // Hold for a beat so they can say who they are first.
+    if (this.greetingDelayMs > 0) {
+      this.whenReady(() => setTimeout(() => this.#createGreeting(), this.greetingDelayMs));
+    } else {
+      this.whenReady(() => this.#createGreeting());
+    }
   }
 
   #createGreeting() {
@@ -306,6 +346,10 @@ export class Realtime {
   }
 
   cancelResponse() {
+    // Azure answers a cancel with no response running as a hard error, which
+    // then shows up as a FAIL line in a log that is meant to mean something.
+    // Nothing is in flight once response.done has cleared the id.
+    if (!this.currentResponseId) return;
     this.#raw({ type: 'response.cancel' });
   }
 

@@ -191,7 +191,7 @@ console.log('\nranking');
 {
   const co = (name, rating, reviews) => ({ name, rating, reviews, phone: '+14255550100', phoneSource: 'fixture' });
 
-  // The whole reason for the prior: one glowing review is not evidence.
+  // The whole reason for the review bonus: one glowing review is not evidence.
   const list = rank([co('One Review', 5, 1), co('Well Reviewed', 4.8, 1135)]);
   ok('a 4.8 with a thousand reviews beats a 5.0 with one', list[0].name === 'Well Reviewed', JSON.stringify(list.map((c) => c.name)));
 
@@ -203,10 +203,12 @@ console.log('\nranking');
   const same = rank([co('Fewer', 4.9, 30), co('More', 4.9, 900)]);
   ok('same rating, more reviews ranks higher', same[0].name === 'More');
 
-  ok('a score sits between the average and the rating', (() => {
-    const s = score(co('X', 5, 20));
-    return s > 4.3 && s < 5;
-  })());
+  // The formula, stated outright: stars x (1 + log10(reviews) / 10).
+  const near = (a, b) => Math.abs(a - b) < 0.0001;
+  ok('4.8 with 1000 reviews scores 4.8 x 1.3', near(score(co('X', 4.8, 1000)), 4.8 * 1.3), String(score(co('X', 4.8, 1000))));
+  ok('one review earns no bonus at all', near(score(co('X', 4.8, 1)), 4.8));
+  ok('ten reviews earn ten percent', near(score(co('X', 4.8, 10)), 4.8 * 1.1));
+  ok('a hundred reviews earn twenty percent', near(score(co('X', 4.8, 100)), 4.8 * 1.2));
   ok('no reviews scores zero rather than crashing', score(co('X', 5, 0)) === 0);
   ok('a missing rating scores zero', score({ reviews: 100 }) === 0);
   ok('ranking does not mutate the list it was given', (() => {

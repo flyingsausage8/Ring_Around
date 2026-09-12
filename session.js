@@ -36,7 +36,11 @@ export class CallSession {
     this.startedAt = Date.now();
 
     this.findings = new Findings();
-    this.transcript = new Transcript({ to: target.phone, company: target.name });
+    this.transcript = new Transcript({
+      to: target.phone,
+      company: target.name,
+      onLine: (line) => this.onEvent({ type: 'line', callSid: this.callSid, line }),
+    });
 
     this.done = new Promise((resolve) => {
       this.resolveDone = resolve;
@@ -50,6 +54,10 @@ export class CallSession {
       onSettled: ({ text, totalMs, heardMs, heardFraction }) => {
         if (!text) return;
         const pct = Math.round(heardFraction * 100);
+        // A turn only counts as something she said if the caller actually heard
+        // some of it. A question that was cut off before it played is not a
+        // question anyone can have answered.
+        if (heardMs >= 150) this.findings.noteAgentTurn(text);
         this.transcript.agent(text, { heardFraction, heardMs, totalMs });
         if (pct >= 99) {
           log.info('caller heard', JSON.stringify(text));

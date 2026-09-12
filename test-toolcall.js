@@ -34,6 +34,7 @@ function harness() {
   let ended = null;
   const rt = new Realtime({
     tools: TOOLS,
+    greetingDelayMs: 0,
     onToolCall: (name, args) => runTool(findings, name, args, { onEndCall: (r) => (ended = r) }),
   });
   rt.ws = { readyState: 1, send: (s) => sent.push(JSON.parse(s)) };
@@ -71,6 +72,82 @@ console.log('\nasking for the follow-up reply');
   await new Promise((r) => setTimeout(r, 10));
   ok('a new reply is requested once the response finishes', sent.some((m) => m.type === 'response.create'));
   ok('...exactly once', sent.filter((m) => m.type === 'response.create').length === 1);
+}
+
+console.log('\nnot answering twice when she has already spoken');
+{
+  // The bug this replaces: a note went in cleanly, she had already said her
+  // piece in that same response, and we asked for another reply anyway - so
+  // she talked over herself 0.4s after finishing.
+  const { rt, sent } = harness();
+  rt.onAzureEvent({ type: 'response.created', response: { id: 'resp_1' } });
+  rt.onAzureEvent({ type: 'response.output_audio.delta', delta: 'AAAA' });
+  rt.onAzureEvent({
+    type: 'response.function_call_arguments.done',
+    name: 'note_callout',
+    call_id: 'call_1',
+    arguments: JSON.stringify({ feeUsd: 60, waivedIfRepaired: true }),
+  });
+  rt.onAzureEvent({ type: 'response.done', response: { id: 'resp_1', status: 'completed' } });
+  await new Promise((r) => setTimeout(r, 10));
+  ok('she spoke and the note went in - no second reply is forced', !sent.some((m) => m.type === 'response.create'));
+}
+
+console.log('\nstill speaking up when the result is news');
+{
+  // A refused slot is news: she has to tell them it does not work. She gets a
+  // reply even though she already spoke.
+  const { rt, sent } = harness();
+  rt.onAzureEvent({ type: 'response.created', response: { id: 'resp_1' } });
+  rt.onAzureEvent({ type: 'response.output_audio.delta', delta: 'AAAA' });
+  rt.onAzureEvent({
+    type: 'response.function_call_arguments.done',
+    name: 'note_time_slot',
+    call_id: 'call_2',
+    arguments: JSON.stringify({ day: 'thu', startTime: '09:00', endTime: '10:00' }),
+  });
+  rt.onAzureEvent({ type: 'response.done', response: { id: 'resp_1', status: 'completed' } });
+  await new Promise((r) => setTimeout(r, 10));
+  ok('a refused note still gets said out loud', sent.some((m) => m.type === 'response.create'));
+}
+
+console.log('\nstill speaking up when she wrote without talking');
+{
+  // A silent tool call would otherwise leave dead air on the line.
+  const { rt, sent } = harness();
+  toolCall(rt, 'note_visit_duration', { minMinutes: 30 });
+  rt.onAzureEvent({ type: 'response.done', response: { id: 'resp_1', status: 'completed' } });
+  await new Promise((r) => setTimeout(r, 10));
+  ok('a note written in silence still gets a reply', sent.some((m) => m.type === 'response.create'));
+}
+
+console.log('\nnot starting a new turn once the call is ending');
+{
+  const { rt, sent } = harness();
+  rt.onAzureEvent({ type: 'response.created', response: { id: 'resp_1' } });
+  rt.onAzureEvent({ type: 'response.output_audio.delta', delta: 'AAAA' });
+  rt.onAzureEvent({
+    type: 'response.function_call_arguments.done',
+    name: 'end_call',
+    call_id: 'call_3',
+    arguments: JSON.stringify({ reason: 'said_goodbye' }),
+  });
+  rt.onAzureEvent({ type: 'response.done', response: { id: 'resp_1', status: 'completed' } });
+  await new Promise((r) => setTimeout(r, 10));
+  ok('ending the call does not trigger one more thing to say', !sent.some((m) => m.type === 'response.create'));
+}
+
+console.log('\na turn that could not be transcribed is still written down');
+{
+  const heard = [];
+  const rt = new Realtime({ tools: TOOLS, onToolCall: () => ({ ok: true }), onCallerTranscript: (t) => heard.push(t) });
+  rt.ws = { readyState: 1, send: () => {} };
+  rt.ready = true;
+  rt.onAzureEvent({
+    type: 'conversation.item.input_audio_transcription.failed',
+    error: { message: 'audio too short' },
+  });
+  ok('a failed transcription reaches the transcript as a blank turn', heard.length === 1 && heard[0] === '');
 }
 
 console.log('\nbarge-in during a tool call');
