@@ -10,8 +10,14 @@
 // wrong, and "Thursday" would resolve to the wrong day.
 
 import { cfg } from './config.js';
+import { getJob, describeWindows } from './job.js';
 
-const job = cfg.job;
+// Everything below is built per call, not once at import. The job is no longer
+// a block of environment variables fixed at startup - step 1 of the portal
+// builds it from a conversation, so it can change while the server is running.
+// A briefing frozen at import would describe whoever the last restart happened
+// to be about.
+function briefingFor(job, now) {
 
 // What the agent is allowed to say out loud about where the job is. Street
 // address and phone number are deliberately not on the call - they go out
@@ -499,7 +505,7 @@ catch yourself explaining a restriction that is not written above, stop: you
 invented it, and you are about to turn down something that would have worked.
 `.trim();
 
-export function buildInstructions(now = new Date()) {
+function composeInstructions(job, now) {
   return `
 You are ${cfg.agentName}, an AI assistant on a real phone call to an appliance
 repair company, calling on behalf of ${job.client}. Someone has just picked up
@@ -547,7 +553,15 @@ ${Math.round(cfg.maxCallSeconds / 60)} minutes.
 `.trim();
 }
 
+  return composeInstructions(job, now);
+}
+
+export function buildInstructions(now = new Date()) {
+  return briefingFor(getJob(), now);
+}
+
 export function buildGreeting() {
+  const job = getJob();
   return `
 Open the call now. Say hi, give your name as ${cfg.agentName}, say plainly that
 you are an AI assistant calling on behalf of ${job.client} about an appliance

@@ -19,6 +19,7 @@
 
 import fs from 'node:fs';
 import { cfg } from './config.js';
+import { getJob } from './job.js';
 import * as log from './log.js';
 
 const FIXTURE = 'contractors.local.json';
@@ -128,13 +129,15 @@ export async function searchPlaces({
   // Where the client actually lives. Without this the search is nationwide and
   // comes back with shops a thousand miles away - a 515 number is Iowa, and no
   // amount of good ratings makes that useful to somebody in Redmond.
-  area = [cfg.job.area, cfg.job.zip].filter(Boolean).join(' '),
+  area = null,
   limit = 10,
   key = process.env.GOOGLE_MAPS_API_KEY,
   fetchImpl = fetch,
+  job = getJob(),
 } = {}) {
+  area = area ?? [job.area, job.zip].filter(Boolean).join(' ');
   if (!key) throw new Error('GOOGLE_MAPS_API_KEY is not set - cannot search Places');
-  if (!area) throw new Error('no area to search in - set JOB_AREA and JOB_ZIP');
+  if (!area) throw new Error('no area to search in - fill in step 1 first');
 
   const textQuery = `${query} in ${area}`;
   log.stage('DISCOVERY_SEARCH', `places text search: ${JSON.stringify(textQuery)} limit=${limit}`);
@@ -147,11 +150,11 @@ export async function searchPlaces({
     languageCode: 'en',
     regionCode: 'US',
   };
-  if (Number.isFinite(cfg.job.lat) && Number.isFinite(cfg.job.lng)) {
+  if (Number.isFinite(job.lat) && Number.isFinite(job.lng)) {
     payload.locationBias = {
       circle: {
-        center: { latitude: cfg.job.lat, longitude: cfg.job.lng },
-        radius: cfg.job.radiusMeters,
+        center: { latitude: job.lat, longitude: job.lng },
+        radius: job.radiusMeters,
       },
     };
   }

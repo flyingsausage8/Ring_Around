@@ -10,3 +10,6 @@ calls/
 contractors.local.json
 
 tunnel.log
+
+job.json
+server.log

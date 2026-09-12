@@ -240,19 +240,18 @@ const asked = (n) => {
   ok('...because the thing we just heard was nothing', n.heardSomething() === false);
 }
 
-console.log('\na late machine verdict never beats a live person');
+console.log('\na machine-detection guess never hangs up a call');
 {
-  // The base fix for this lives in dialer.js: Twilio is asked for a plain
-  // human-or-machine verdict with a five second ceiling, instead of being told
-  // to wait for an answering machine to finish its outgoing greeting. That is
-  // what made a verdict land thirty seconds in, halfway through a real
-  // conversation, and hang up on the man we were talking to.
-  const src = fs.readFileSync(new URL('./dialer.js', import.meta.url), 'utf8');
-  ok('machine detection is not told to wait for a message to end', !/machineDetection:\s*'DetectMessageEnd'/.test(src));
-  ok('...it just answers human or machine', /machineDetection:\s*'Enable'/.test(src));
-  ok('...within a hard time limit', /machineDetectionTimeout:\s*\d+/.test(src));
-  const secs = Number((src.match(/machineDetectionTimeout:\s*(\d+)/) || [])[1]);
-  ok('...and that limit is short enough to beat any conversation', secs > 0 && secs <= 10, `${secs}s`);
+  // Twilio's detector was wrong about a live human twice: once arriving thirty
+  // seconds late, mid-conversation, and once calling a man saying "hello" a
+  // voicemail four seconds in. It is now advisory - logged, never obeyed. The
+  // agent decides, by listening, using note_bad_pickup.
+  const srv = fs.readFileSync(new URL('./server.js', import.meta.url), 'utf8');
+  const handler = (srv.split("route === '/amd'")[1] || '').slice(0, 1200);
+  ok('the /amd route exists', handler.length > 0);
+  ok('...and cannot end a call', !/requestHangup/.test(handler));
+  ok('...and cannot write a bad pickup down', !/noteBadPickup/.test(handler));
+  ok('...but is still logged', /log\.stage\('AMD'/.test(handler));
 }
 {
   // A real voicemail must still be recordable. Its greeting is speech, and it

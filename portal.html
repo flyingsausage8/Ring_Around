@@ -58,6 +58,28 @@
   .err { color: #f28b82; }
   .ok { color: #81c995; }
   .note { color: #9aa0a6; font-size: 13px; margin-left: 6px; }
+
+  /* Step 1: the intake chat */
+  .intake { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 16px; max-width: 1080px; align-items: start; }
+  .chatcard { max-width: none; padding: 0; display: flex; flex-direction: column; }
+  .chat { padding: 16px 18px 4px; height: 380px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+  .msg { max-width: 82%; padding: 9px 13px; border-radius: 12px; white-space: pre-wrap; }
+  .msg.bot { background: #22262d; border-bottom-left-radius: 3px; align-self: flex-start; }
+  .msg.me { background: #1f4a7a; border-bottom-right-radius: 3px; align-self: flex-end; }
+  .msg.thinking { color: #8b9096; font-style: italic; background: none; padding-left: 2px; }
+  .composer { display: flex; gap: 8px; padding: 12px 14px; border-top: 1px solid #2a2e35; }
+  .composer textarea { flex: 1; font: inherit; resize: none; padding: 10px 12px; border-radius: 8px; border: 1px solid #3c4043; background: #16191e; color: #e8eaed; max-height: 140px; }
+  .composer textarea:focus { outline: none; border-color: #5b6572; }
+  .composer button { margin: 0; }
+  .chatcard .note { padding: 0 16px 12px; margin: 0; }
+
+  .jobcard { max-width: none; font-size: 13px; }
+  .jobtitle { display: flex; align-items: center; justify-content: space-between; color: #9aa0a6; font-size: 12px; letter-spacing: .06em; text-transform: uppercase; margin-bottom: 12px; }
+  .jobcard dl { grid-template-columns: 88px 1fr; gap: 7px 12px; }
+  .jobcard dd.blank { color: #5f656d; }
+  button.tiny { font-size: 11px; padding: 3px 9px; margin: 0; text-transform: none; letter-spacing: 0; }
+  .needed { margin-top: 14px; padding-top: 12px; border-top: 1px solid #2a2e35; color: #f5c77e; font-size: 12px; }
+  .needed.done { color: #81c995; }
 </style>
 
 <h1>Ring Around</h1>
@@ -66,12 +88,24 @@
 
 <!-- Step 1 -->
 <div class="step" id="step1">
-  <div class="steplabel">Step 1 &middot; The job</div>
-  <div class="card">
-    <dl id="jobcard"></dl>
-    <button id="begin" class="go big">Start</button>
-    <span class="note" id="beginNote"></span>
+  <div class="steplabel">Step 1 &middot; Tell us what is wrong</div>
+  <div class="intake">
+    <div class="card chatcard">
+      <div id="chat" class="chat"></div>
+      <div class="composer">
+        <textarea id="say" rows="1" placeholder="my oven stopped heating…" autocomplete="off"></textarea>
+        <button id="send" class="go">Send</button>
+      </div>
+      <div class="note" id="chatNote"></div>
+    </div>
+    <div class="card jobcard">
+      <div class="jobtitle">The job so far <button id="restart" class="tiny">start over</button></div>
+      <dl id="jobcard"></dl>
+      <div id="needed" class="needed"></div>
+    </div>
   </div>
+  <button id="begin" class="go big" disabled>Find contractors</button>
+  <span class="note" id="beginNote">tell the assistant about the job first</span>
 </div>
 
 <!-- Step 2 -->
@@ -126,28 +160,118 @@
     return fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}) }).then(function (r) { return r.json(); });
   }
 
-  // ---- Step 1: the job, straight from the server's config ----
-  fetch('/api/job').then(function (r) { return r.json(); }).then(function (d) {
+  // ---- Step 1: the intake chat ----
+  // The conversation lives here in the page; the job it produces lives on the
+  // server, because the server is what steps 2 and 3 read. Every reply comes
+  // back with the job as it now stands, so the panel on the right can never
+  // disagree with what the next step will actually use.
+  var chat = [];
+  var busy = false;
+
+  function drawChat() {
+    $('chat').innerHTML = chat.map(function (m) {
+      return '<div class="msg ' + (m.role === 'user' ? 'me' : 'bot') + '">' + esc(m.content) + '</div>';
+    }).join('') + (busy ? '<div class="msg thinking">typing…</div>' : '');
+    $('chat').scrollTop = $('chat').scrollHeight;
+  }
+
+  function drawJob(d) {
     var j = d.job || {};
     var rows = [
-      ['Appliance', [j.brand, 'cooktop'].filter(Boolean).join(' ')],
-      ['Type', j.fuel || 'not known'],
-      ['Age', j.age || 'not known'],
-      ['Problem', j.issue || ''],
-      ['Area', [j.area, j.zip].filter(Boolean).join(' ')],
-      ['Free', j.availability || ''],
-      ['Calling as', d.agent + ', for ' + (j.client || '')]
+      ['Name', j.client],
+      ['Where', [j.area, j.zip].filter(Boolean).join(' ')],
+      ['Problem', j.issue],
+      ['Appliance', [j.brand, j.fuel].filter(Boolean).join(', ')],
+      ['Age', j.age],
+      ['Budget', j.budgetLow || j.budgetHigh ? '$' + (j.budgetLow || 0) + ' to $' + (j.budgetHigh || '?') : ''],
+      ['Free', d.availabilityText && d.availabilityText.indexOf('no times') !== 0 ? d.availabilityText : '']
     ];
     $('jobcard').innerHTML = rows.map(function (r) {
-      return '<dt>' + esc(r[0]) + '</dt><dd>' + esc(r[1]) + '</dd>';
+      var v = r[1];
+      return '<dt>' + esc(r[0]) + '</dt><dd class="' + (v ? '' : 'blank') + '">' + esc(v || 'not yet') + '</dd>';
     }).join('');
+
+    var missing = d.missing || [];
+    $('needed').className = 'needed' + (missing.length ? '' : ' done');
+    $('needed').textContent = missing.length
+      ? 'still needed: ' + missing.join(', ')
+      : 'everything needed is here';
+
+    // The button is the gate. Nobody gets called about a job we half know.
+    $('begin').disabled = !d.ready || busy;
+    $('beginNote').textContent = d.ready ? '' : 'tell the assistant about the job first';
+  }
+
+  function turn(text) {
+    if (busy) return;
+    if (text) chat.push({ role: 'user', content: text });
+    busy = true;
+    $('send').disabled = true;
+    $('begin').disabled = true;
+    drawChat();
+    post('/api/intake', { history: chat }).then(function (d) {
+      busy = false;
+      $('send').disabled = false;
+      if (!d.ok) {
+        $('chatNote').innerHTML = '<span class="err">' + esc(d.error) + '</span>';
+        drawChat();
+        return;
+      }
+      $('chatNote').textContent = '';
+      chat.push({ role: 'assistant', content: d.reply });
+      drawChat();
+      drawJob(d);
+    }).catch(function (e) {
+      busy = false;
+      $('send').disabled = false;
+      $('chatNote').innerHTML = '<span class="err">could not reach the server: ' + esc(e.message) + '</span>';
+      drawChat();
+    });
+  }
+
+  $('send').onclick = function () {
+    var t = $('say').value.trim();
+    if (!t) return;
+    $('say').value = '';
+    $('say').style.height = 'auto';
+    turn(t);
+  };
+
+  // Enter sends, shift-enter makes a new line - what everyone already expects
+  // from a chat box.
+  $('say').onkeydown = function (e) {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('send').onclick(); }
+  };
+  $('say').oninput = function () {
+    this.style.height = 'auto';
+    this.style.height = Math.min(this.scrollHeight, 140) + 'px';
+  };
+
+  $('restart').onclick = function () {
+    if (!confirm('Forget this job and start again?')) return;
+    post('/api/intake/reset').then(function (d) {
+      if (!d.ok) { $('chatNote').innerHTML = '<span class="err">' + esc(d.error) + '</span>'; return; }
+      chat = [];
+      shops = [];
+      drawShops();
+      $('step2').classList.add('off');
+      $('step3').classList.add('off');
+      drawJob(d);
+      turn('');
+    });
+  };
+
+  // Load whatever the server already knows, then let the assistant open.
+  fetch('/api/job').then(function (r) { return r.json(); }).then(function (d) {
+    drawJob(d);
+    turn('');
   });
 
   // Start runs discovery on its own, then opens the queue. It does not dial -
   // dialling is always a separate, deliberate press.
   $('begin').onclick = function () {
     $('begin').disabled = true;
-    $('beginNote').textContent = 'searching Redmond…';
+    $('beginNote').textContent = 'searching…';
     $('step2').classList.remove('off');
     post('/api/discover', { limit: 10 }).then(function (r) {
       $('begin').disabled = false;

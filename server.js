@@ -7,6 +7,8 @@ import { CallSession } from './session.js';
 import { CallQueue } from './queue.js';
 import { makeDialer, claimPending, assertReachable } from './dialer.js';
 import { discover, loadFixture, rank } from './discovery.js';
+import { getJob, resetJob, missingFields, isReady, describeWindows } from './job.js';
+import { intakeTurn, locate } from './intake.js';
 import * as log from './log.js';
 
 if (!checkEnv()) process.exit(1);
@@ -20,10 +22,6 @@ const rang = new Set();
 
 // The call on the line right now, so a late verdict from Twilio can reach it.
 let liveSession = null;
-
-// Twilio is told to make its mind up within 5 seconds. Anything arriving well
-// after that is not a verdict about who picked up the phone.
-const AMD_VERDICT_GOOD_FOR_SEC = 15;
 
 function broadcast(event, data) {
   const frame = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -140,10 +138,53 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // The job the agent is calling about, so the portal does not have to
-  // hard-code what is already in the config.
+  // The job the agent is calling about. Step 1 builds this from a
+  // conversation, so it is read fresh every time rather than being whatever
+  // the environment said at startup.
   if (route === '/api/job') {
-    return json(res, 200, { job: cfg.job, agent: cfg.agentName, myNumber: cfg.to });
+    const job = getJob();
+    return json(res, 200, {
+      job,
+      agent: cfg.agentName,
+      myNumber: cfg.to,
+      missing: missingFields(job),
+      ready: isReady(job),
+      availabilityText: describeWindows(job.windows),
+    });
+  }
+
+  // Step 1: the intake chat. The browser keeps the conversation and sends it
+  // back each turn; the job itself lives here, on the server, because it is
+  // what steps 2 and 3 read.
+  if (route === '/api/intake' && req.method === 'POST') {
+    const body = await readBody(req);
+    try {
+      const out = await intakeTurn(Array.isArray(body.history) ? body.history : []);
+      // Once there is somewhere to search, turn it into real coordinates.
+      // Words alone once returned appliance shops in Iowa for a Redmond job.
+      if (out.job.area || out.job.zip) await locate(out.job).catch((e) => log.warn('intake', e.message));
+      const job = getJob();
+      return json(res, 200, {
+        ok: true,
+        reply: out.reply,
+        job,
+        saved: out.saved,
+        rejected: out.rejected,
+        missing: missingFields(job),
+        ready: isReady(job),
+        availabilityText: describeWindows(job.windows),
+      });
+    } catch (err) {
+      log.fail('INTAKE', err.message);
+      return json(res, 502, { ok: false, error: err.message });
+    }
+  }
+
+  if (route === '/api/intake/reset' && req.method === 'POST') {
+    if (activeQueue()) return json(res, 409, { ok: false, error: 'a call is running - stop it first' });
+    const job = resetJob();
+    log.info('intake', 'started a new job');
+    return json(res, 200, { ok: true, job, missing: missingFields(job), ready: isReady(job) });
   }
 
   // Every call that has ever finished, rebuilt from disk. The queues only
@@ -227,8 +268,18 @@ const server = http.createServer(async (req, res) => {
     return res.end();
   }
 
-  // Twilio's verdict on who picked up. It arrives a few seconds into the call,
-  // separately from everything else.
+  // Twilio's guess at who picked up. It is a guess, and it has now been wrong
+  // on a live human twice - once arriving thirty seconds late and hanging up
+  // mid-conversation, once calling a man saying "hello" a voicemail greeting
+  // four seconds in. Answering the phone with a short word and a pause looks
+  // exactly like the start of an outgoing message, and no amount of tuning
+  // fixes that.
+  //
+  // So it no longer has the authority to end a call. It is written to the log,
+  // where it is useful for working out what happened, and that is all. The
+  // agent decides whether she is talking to a machine, by listening to it -
+  // she has note_bad_pickup for exactly that, and the briefing tells her never
+  // to leave a message. A guess is not allowed to hang up on a customer.
   if (route === '/amd') {
     const body = await new Promise((r) => {
       let b = '';
@@ -237,23 +288,9 @@ const server = http.createServer(async (req, res) => {
     });
     const p = new URLSearchParams(body);
     const who = p.get('AnsweredBy');
-    log.stage('AMD', `${who} sid=${p.get('CallSid')}`);
     const s = liveSession;
-    if (s && who && who !== 'human' && who !== 'unknown') {
-      // Twilio is asked to decide within 5 seconds (see dialer.js), so a
-      // verdict cannot normally arrive late. If one ever does - a setting
-      // drifts, Twilio changes its timing - it is about the first moments of
-      // the call and says nothing about a conversation that has been running
-      // for half a minute. Reading a clock, nothing else.
-      const age = Math.round((Date.now() - s.startedAt) / 1000);
-      if (age > AMD_VERDICT_GOOD_FOR_SEC) {
-        log.warn('amd', `${who} arrived ${age}s in - too late to be about who picked up, ignoring it`);
-      } else {
-        log.warn('amd', `${who} answered - hanging up rather than talking to a machine`);
-        s.findings.noteBadPickup(who === 'fax' ? 'no_one_there' : 'voicemail', `Twilio heard ${who}`);
-        s.requestHangup('no_one_there');
-      }
-    }
+    const age = s ? `, ${Math.round((Date.now() - s.startedAt) / 1000)}s in` : '';
+    log.stage('AMD', `${who} sid=${p.get('CallSid')}${age} (for the record only - she decides)`);
     res.writeHead(204);
     return res.end();
   }
@@ -270,6 +307,13 @@ const server = http.createServer(async (req, res) => {
     const body = await readBody(req);
     try {
       const source = body.source === 'fixture' ? 'fixture' : 'places';
+      // Searching before step 1 is finished means searching the wrong town,
+      // or nowhere at all. Say which part is missing rather than returning an
+      // empty list that looks like "no contractors near you".
+      const gaps = missingFields();
+      if (source !== 'fixture' && gaps.length) {
+        return json(res, 400, { ok: false, error: `step 1 is not finished - still need: ${gaps.join(', ')}` });
+      }
       const list = source === 'fixture' ? rank(loadFixture()) : await discover({ ...body, source: 'places' });
       broadcast('contractors', { source, contractors: list });
       return json(res, 200, { ok: true, source, contractors: list });
@@ -292,6 +336,14 @@ const server = http.createServer(async (req, res) => {
       }
       if (!Array.isArray(targets) || !targets.length) {
         return json(res, 400, { ok: false, error: 'no targets - run discovery first' });
+      }
+
+      // Nothing gets dialled about a job we only half know. A contractor
+      // asking "and who is this for?" and getting "the client" is worse than
+      // not calling at all.
+      const gaps = missingFields();
+      if (gaps.length) {
+        return json(res, 400, { ok: false, error: `step 1 is not finished - still need: ${gaps.join(', ')}` });
       }
 
       // Tell them now, not after the phone has rung out. A dead tunnel means
