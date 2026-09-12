@@ -1,0 +1,31 @@
+{
+  "name": "ring-around",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server.js",
+    "preflight": "node preflight.js",
+    "call": "node call.js",
+    "tunnel": "cloudflared.exe tunnel --url http://localhost:8080"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/flyingsausage8/Ring_Around.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/flyingsausage8/Ring_Around/issues"
+  },
+  "homepage": "https://github.com/flyingsausage8/Ring_Around#readme",
+  "private": "true",
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "twilio": "^6.1.0",
+    "ws": "^8.21.3"
+  }
+}

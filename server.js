@@ -1,0 +1,161 @@
+import http from 'node:http';
+import { WebSocketServer } from 'ws';
+import { cfg, checkEnv } from './config.js';
+import { Realtime } from './realtime.js';
+import * as log from './log.js';
+
+if (!checkEnv()) process.exit(1);
+
+// No briefing yet - this is the "does the wire work" build.
+const INSTRUCTIONS = [
+  'You are on a live phone call. Speak English.',
+  'Talk like a person: short sentences, contractions, a little filler.',
+  'Never say you are an AI assistant unless you are asked directly.',
+  'This is a plumbing test of the phone line, so just chat naturally',
+  'and keep the conversation going.',
+].join(' ');
+
+const GREETING = 'Say hi, say the line is working, and ask how they are doing. One or two sentences.';
+
+function twiml() {
+  const url = `wss://${cfg.publicHost}/media`;
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Connect>
+    <Stream url="${url}" />
+  </Connect>
+</Response>`;
+}
+
+const server = http.createServer((req, res) => {
+  const path = req.url.split('?')[0];
+
+  if (path === '/health') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    return res.end(JSON.stringify({ ok: true, publicHost: cfg.publicHost || null }));
+  }
+
+  if (path === '/twiml') {
+    log.stage('TWILIO_FETCH_TWIML', `${req.method} from ${req.socket.remoteAddress}`);
+    if (!cfg.publicHost) {
+      log.fail('TWIML_SENT', 'PUBLIC_HOST is empty - Twilio would dial wss://undefined/media');
+      res.writeHead(500);
+      return res.end('PUBLIC_HOST not set');
+    }
+    const body = twiml();
+    res.writeHead(200, { 'content-type': 'text/xml' });
+    res.end(body);
+    log.stage('TWIML_SENT', `stream -> wss://${cfg.publicHost}/media`);
+    return;
+  }
+
+  if (path === '/status') {
+    let body = '';
+    req.on('data', (d) => (body += d));
+    req.on('end', () => {
+      const p = new URLSearchParams(body);
+      log.info('twilio status', `${p.get('CallStatus')} sid=${p.get('CallSid')} ${p.get('ErrorCode') ? 'err=' + p.get('ErrorCode') : ''}`);
+      res.writeHead(204);
+      res.end();
+    });
+    return;
+  }
+
+  res.writeHead(404);
+  res.end('no');
+});
+
+const wss = new WebSocketServer({ server, path: '/media' });
+
+wss.on('connection', (twilioWs, req) => {
+  log.resetOnce();
+  log.stage('TWILIO_WS_OPEN', `from ${req.socket.remoteAddress}`);
+
+  let streamSid = null;
+  let callSid = null;
+  let framesIn = 0;
+  let framesOut = 0;
+  let lastCallerAudio = Date.now();
+  let closed = false;
+
+  const azure = new Realtime({
+    instructions: INSTRUCTIONS,
+    onAudio: (b64) => {
+      if (!streamSid || twilioWs.readyState !== twilioWs.OPEN) return;
+      twilioWs.send(JSON.stringify({ event: 'media', streamSid, media: { payload: b64 } }));
+      framesOut++;
+      log.once('TWILIO_AUDIO_OUT', `streamSid=${streamSid}`);
+    },
+    onBargeIn: () => {
+      if (streamSid && twilioWs.readyState === twilioWs.OPEN) {
+        twilioWs.send(JSON.stringify({ event: 'clear', streamSid }));
+      }
+    },
+    onClose: () => shutdown('azure closed'),
+  });
+
+  function shutdown(why) {
+    if (closed) return;
+    closed = true;
+    clearInterval(timer);
+    log.info('shutdown', `${why} framesIn=${framesIn} framesOut=${framesOut}`);
+    azure.close();
+    try {
+      twilioWs.close();
+    } catch {}
+  }
+
+  const startedAt = Date.now();
+  const timer = setInterval(() => {
+    const idle = (Date.now() - lastCallerAudio) / 1000;
+    const total = (Date.now() - startedAt) / 1000;
+    if (total > cfg.maxCallSeconds) shutdown(`max call length ${cfg.maxCallSeconds}s`);
+    else if (idle > cfg.idleHangupSeconds * 3) shutdown(`no audio from phone for ${idle.toFixed(0)}s`);
+  }, 2000);
+
+  twilioWs.on('message', (raw) => {
+    let msg;
+    try {
+      msg = JSON.parse(raw.toString());
+    } catch {
+      return;
+    }
+
+    switch (msg.event) {
+      case 'start':
+        streamSid = msg.start.streamSid;
+        callSid = msg.start.callSid;
+        log.stage('TWILIO_STREAM_START', `callSid=${callSid} streamSid=${streamSid} codec=${msg.start.mediaFormat?.encoding}@${msg.start.mediaFormat?.sampleRate}`);
+        azure.connect();
+        azure.speakFirst(GREETING);
+        break;
+
+      case 'media': {
+        framesIn++;
+        lastCallerAudio = Date.now();
+        log.once('CALLER_AUDIO_IN', `first frame, ${msg.media.payload.length} b64 chars`);
+        if (azure.appendAudio(msg.media.payload)) log.once('AZURE_AUDIO_IN');
+        break;
+      }
+
+      case 'stop':
+        log.info('twilio', 'stop frame');
+        shutdown('twilio sent stop');
+        break;
+
+      default:
+        break;
+    }
+  });
+
+  twilioWs.on('close', (code) => {
+    log.stage('TWILIO_WS_CLOSE', `code=${code} framesIn=${framesIn} framesOut=${framesOut}`);
+    shutdown('twilio socket closed');
+  });
+
+  twilioWs.on('error', (err) => log.fail('TWILIO_WS', err.message));
+});
+
+server.listen(cfg.port, () => {
+  log.stage('HTTP_LISTEN', `http://localhost:${cfg.port}  (/twiml /media /health /status)`);
+});

@@ -1,0 +1,4 @@
+# Keep line endings LF in the repo so a Windows checkout can't rewrite every
+# file and turn a one-line change into a whole-file diff.
+* text=auto eol=lf
+*.exe binary
