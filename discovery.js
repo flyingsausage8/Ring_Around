@@ -212,16 +212,45 @@ export async function searchPlaces({
 // source is chosen by the caller, on purpose. There is no automatic failover:
 // if Places is asked for and Places breaks, this throws, and whoever asked
 // finds out rather than being handed yesterday's file.
-export async function discover({ source = 'places', ...opts } = {}) {
-  if (source === 'fixture') return loadFixture(opts);
-  if (source === 'places') return searchPlaces(opts);
-  throw new Error(`unknown discovery source: ${source} (use "places" or "fixture")`);
+export async function discover({ source = 'places', ranked = true, ...opts } = {}) {
+  let list;
+  if (source === 'fixture') list = loadFixture(opts);
+  else if (source === 'places') list = await searchPlaces(opts);
+  else throw new Error(`unknown discovery source: ${source} (use "places" or "fixture")`);
+  return ranked ? rank(list) : list;
+}
+
+// Ranking. Pure arithmetic on two structured fields - no interpretation of
+// anything anyone wrote.
+//
+// A plain sort by stars puts a 5.0 with one review above a 4.8 with a
+// thousand, which is backwards: one review is not evidence. So each rating is
+// pulled toward the average until enough reviews back it up. That is a
+// Bayesian prior, and it is the standard fix for exactly this.
+//
+// With PRIOR = 20, a business needs about 20 reviews before its own rating
+// counts for most of its score.
+const PRIOR = 20;
+const AVERAGE = 4.3;
+
+export function score(c) {
+  const rating = Number(c.rating);
+  const reviews = Number(c.reviews);
+  if (!Number.isFinite(rating) || !Number.isFinite(reviews) || reviews <= 0) return 0;
+  return (reviews * rating + PRIOR * AVERAGE) / (reviews + PRIOR);
+}
+
+export function rank(list) {
+  return [...list]
+    .map((c) => ({ ...c, score: score(c) }))
+    .sort((a, b) => b.score - a.score || (b.reviews ?? 0) - (a.reviews ?? 0));
 }
 
 export function printContractors(list) {
   for (const [i, c] of list.entries()) {
-    const stars = c.rating ? `${c.rating}* (${c.reviews ?? '?'})` : 'unrated';
-    console.log(`  ${String(i + 1).padStart(2)}. ${c.name}`);
+    const stars = c.rating ? `${c.rating}* (${c.reviews ?? '?'} review${c.reviews === 1 ? '' : 's'})` : 'unrated';
+    const s = c.score !== undefined ? `  score ${c.score.toFixed(2)}` : '';
+    console.log(`  ${String(i + 1).padStart(2)}. ${c.name}${s}`);
     console.log(`      ${c.phone}  ${stars}  [${c.phoneSource}]`);
     if (c.address) console.log(`      ${c.address}`);
   }

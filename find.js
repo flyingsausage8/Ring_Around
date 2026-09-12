@@ -10,7 +10,7 @@
 
 import fs from 'node:fs';
 import { cfg } from './config.js';
-import { discover, printContractors } from './discovery.js';
+import { discover, printContractors, rank } from './discovery.js';
 import * as log from './log.js';
 
 function arg(name, fallback = null) {
@@ -32,6 +32,8 @@ try {
     process.exit(1);
   }
 
+  console.log('');
+  console.log(`  Best first - a rating counts for more once enough people have left one.`);
   console.log('');
   printContractors(list);
   console.log('');

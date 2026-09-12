@@ -236,6 +236,11 @@ wss.on('connection', (twilioWs, req) => {
         }
         lastCallerAudio = now;
         log.once('CALLER_AUDIO_IN', `first frame, ${msg.media.payload.length} b64 chars`);
+        // Once she has decided to hang up, stop feeding Azure. Otherwise every
+        // "um" and "yeah" while she is saying goodbye starts another reply,
+        // and the goodbye never finishes - which is exactly how a call that
+        // was over at 591s was still going at 603s.
+        if (hangupReason) break;
         if (azure.appendAudio(msg.media.payload)) log.once('AZURE_AUDIO_IN');
         break;
       }

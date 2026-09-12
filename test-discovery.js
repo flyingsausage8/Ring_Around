@@ -7,7 +7,7 @@
 // Google Places is never actually called here. A fake fetch returns canned
 // responses, so these run offline and for free.
 
-import { loadFixture, searchPlaces, discover, assertProvenance, toE164 } from './discovery.js';
+import { loadFixture, searchPlaces, discover, assertProvenance, toE164, rank, score } from './discovery.js';
 
 let pass = 0;
 let fail = 0;
@@ -185,6 +185,38 @@ console.log('\nwhat we ask Google for');
   ok('the key goes in a header, not the URL', !captured.url.includes('test-key') && captured.opts.headers['X-Goog-Api-Key'] === 'test-key');
   ok('the area is part of the query', JSON.parse(captured.opts.body).textQuery === 'appliance repair in Redmond WA 98053');
   ok('a phone field is requested', captured.opts.headers['X-Goog-FieldMask'].includes('nationalPhoneNumber'));
+}
+
+console.log('\nranking');
+{
+  const co = (name, rating, reviews) => ({ name, rating, reviews, phone: '+14255550100', phoneSource: 'fixture' });
+
+  // The whole reason for the prior: one glowing review is not evidence.
+  const list = rank([co('One Review', 5, 1), co('Well Reviewed', 4.8, 1135)]);
+  ok('a 4.8 with a thousand reviews beats a 5.0 with one', list[0].name === 'Well Reviewed', JSON.stringify(list.map((c) => c.name)));
+
+  // With enough reviews behind both, the better rating wins again.
+  const solid = rank([co('Good', 4.6, 400), co('Better', 4.9, 400)]);
+  ok('with equal evidence, the higher rating wins', solid[0].name === 'Better');
+
+  // Same rating, more people saying it.
+  const same = rank([co('Fewer', 4.9, 30), co('More', 4.9, 900)]);
+  ok('same rating, more reviews ranks higher', same[0].name === 'More');
+
+  ok('a score sits between the average and the rating', (() => {
+    const s = score(co('X', 5, 20));
+    return s > 4.3 && s < 5;
+  })());
+  ok('no reviews scores zero rather than crashing', score(co('X', 5, 0)) === 0);
+  ok('a missing rating scores zero', score({ reviews: 100 }) === 0);
+  ok('ranking does not mutate the list it was given', (() => {
+    const original = [co('A', 4, 10), co('B', 5, 500)];
+    rank(original);
+    return original[0].name === 'A' && original[0].score === undefined;
+  })());
+  ok('every contractor survives ranking', rank(loadFixture()).length === 10);
+  ok('discover ranks by default', (await discover({ source: 'fixture' }))[0].score !== undefined);
+  ok('ranking can be turned off', (await discover({ source: 'fixture', ranked: false }))[0].score === undefined);
 }
 
 console.log(`\n${pass} passed, ${fail} failed\n`);
