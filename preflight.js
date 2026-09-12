@@ -1,6 +1,7 @@
 // Walks every hop except the phone itself. Run this before dialling anyone.
 import { cfg, checkEnv, azureRealtimeUrl } from './config.js';
 import { Realtime } from './realtime.js';
+import { TOOLS } from './tools.js';
 import * as log from './log.js';
 import twilioLib from 'twilio';
 
@@ -70,9 +71,12 @@ function checkAzure() {
       rt.close();
       resolve(ok);
     };
-    const rt = new Realtime({ instructions: 'preflight', onClose: () => done(false, 'socket closed before session.updated') });
+    // Send the real tool schemas, not an empty list. If Azure rejects one of
+    // them, this is where we want to find out - not thirty seconds into a call
+    // with a contractor who is about to give us a price.
+    const rt = new Realtime({ instructions: 'preflight', tools: TOOLS, onClose: () => done(false, 'socket closed before session.updated') });
     rt.connect();
-    rt.whenReady(() => done(true, 'session accepted audio/pcmu + semantic_vad'));
+    rt.whenReady(() => done(true, `session accepted audio/pcmu + semantic_vad + ${TOOLS.length} tools`));
     setTimeout(() => done(false, 'timed out after 15s'), 15000);
   });
 }

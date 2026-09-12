@@ -36,12 +36,52 @@ export const cfg = {
   // feeds real jobs in.
   job: {
     client: process.env.JOB_CLIENT || 'the client',
-    address: process.env.JOB_ADDRESS || 'an address in the area',
-    phone: process.env.JOB_PHONE || 'a number I can share',
+    company: process.env.JOB_COMPANY || '',
+    area: process.env.JOB_AREA || 'the local area',
+    zip: process.env.JOB_ZIP || '',
+    address: process.env.JOB_ADDRESS || '',
+    phone: process.env.JOB_PHONE || '',
     availability: process.env.JOB_AVAILABILITY || 'most weekday afternoons',
-    issue: process.env.JOB_ISSUE || 'a fridge that has stopped cooling properly',
+    issue: process.env.JOB_ISSUE || 'an appliance that has stopped working',
+    budgetLow: Number(process.env.JOB_BUDGET_LOW || 0) || null,
+    budgetHigh: Number(process.env.JOB_BUDGET_HIGH || 0) || null,
   },
 };
+
+// "mon-fri 13:00-15:00; sat 10:00-23:59" -> windows we can compare against.
+// Fixed config format, so matching its shape is mechanical - it never touches
+// anything a person said.
+const DAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
+
+export function parseWindows(spec) {
+  const out = [];
+  for (const part of (spec || '').split(';')) {
+    const text = part.trim();
+    if (!text) continue;
+    const m = /^([a-z]{3})(?:-([a-z]{3}))?\s+(\d{2}:\d{2})-(\d{2}:\d{2})$/i.exec(text);
+    if (!m) throw new Error(`bad availability window: "${text}"`);
+    const [, fromDay, toDay, start, end] = m;
+    const a = DAYS.indexOf(fromDay.toLowerCase());
+    const b = toDay ? DAYS.indexOf(toDay.toLowerCase()) : a;
+    if (a < 0 || b < 0) throw new Error(`bad day in window: "${text}"`);
+    for (let d = a; ; d = (d + 1) % 7) {
+      out.push({ day: DAYS[d], startMin: toMinutes(start), endMin: toMinutes(end) });
+      if (d === b) break;
+    }
+  }
+  return out;
+}
+
+export function toMinutes(hhmm) {
+  const m = /^(\d{2}):(\d{2})$/.exec(hhmm || '');
+  if (!m) return null;
+  const h = Number(m[1]);
+  const min = Number(m[2]);
+  if (h > 23 || min > 59) return null;
+  return h * 60 + min;
+}
+
+cfg.job.windows = parseWindows(process.env.JOB_AVAILABILITY_WINDOWS || '');
 
 // GA path. /openai/realtime?deployment= is preview only and 404s here.
 export function azureRealtimeUrl() {

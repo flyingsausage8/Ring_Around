@@ -1,9 +1,13 @@
 import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
 import { WebSocketServer } from 'ws';
 import { cfg, checkEnv } from './config.js';
 import { Realtime } from './realtime.js';
 import { Playback } from './playback.js';
-import { INSTRUCTIONS, GREETING } from './briefing.js';
+import { Findings } from './findings.js';
+import { TOOLS, runTool } from './tools.js';
+import { buildInstructions, buildGreeting } from './briefing.js';
 import * as log from './log.js';
 
 if (!checkEnv()) process.exit(1);
@@ -70,6 +74,11 @@ wss.on('connection', (twilioWs, req) => {
   let lastCallerAudio = Date.now();
   let lastStreamMs = null;
   let closed = false;
+  let responsesInFlight = 0;
+  let hangupReason = null;
+  let hangupTimer = null;
+
+  const findings = new Findings();
 
   const playback = new Playback({
     onSettled: ({ text, totalMs, heardMs, heardFraction }) => {
@@ -86,9 +95,17 @@ wss.on('connection', (twilioWs, req) => {
   });
 
   const azure = new Realtime({
-    instructions: INSTRUCTIONS,
-    onResponseStart: (id) => playback.startResponse(id),
-    onTranscript: (id, text, status) => playback.endResponse(id, text, status),
+    instructions: buildInstructions(),
+    tools: TOOLS,
+    onToolCall: (name, args) => runTool(findings, name, args, { onEndCall: requestHangup }),
+    onResponseStart: (id) => {
+      responsesInFlight++;
+      playback.startResponse(id);
+    },
+    onTranscript: (id, text, status) => {
+      responsesInFlight = Math.max(0, responsesInFlight - 1);
+      playback.endResponse(id, text, status);
+    },
     onAudio: (b64, responseId) => {
       if (!streamSid || twilioWs.readyState !== twilioWs.OPEN) return;
       twilioWs.send(JSON.stringify({ event: 'media', streamSid, media: { payload: b64 } }));
@@ -111,11 +128,63 @@ wss.on('connection', (twilioWs, req) => {
     onClose: () => shutdown('azure closed'),
   });
 
+  // The agent asked to hang up. Her goodbye is still sitting in Twilio's
+  // buffer at this point, so dropping the line now would cut her off mid
+  // sentence. Wait until she has stopped generating and Twilio has confirmed
+  // the last chunk actually played, then go. The cap is there so a stalled
+  // buffer can never hold the line open.
+  function requestHangup(reason) {
+    if (hangupReason) return;
+    hangupReason = reason;
+    const rude = reason === 'they_asked' || reason === 'hostile' || reason === 'no_one_there';
+    log.info('hangup asked', `${reason}${rude ? ' - going now' : ' - after the goodbye plays'}`);
+
+    if (rude) {
+      azure.cancelResponse();
+      hangupTimer = setTimeout(() => hangUp(reason), 500);
+      return;
+    }
+
+    const deadline = Date.now() + 20000;
+    const tick = () => {
+      if (closed) return;
+      const backlog = playback.backlogMs;
+      const busy = responsesInFlight > 0;
+      if (!busy && backlog <= 0) return hangUp(reason);
+      if (Date.now() > deadline) {
+        log.warn('hangup', `waited 20s and ${busy ? 'she is still talking' : `${(backlog / 1000).toFixed(1)}s is still queued`} - going anyway`);
+        return hangUp(reason);
+      }
+      hangupTimer = setTimeout(tick, 250);
+    };
+    hangupTimer = setTimeout(tick, 250);
+  }
+
+  function hangUp(reason) {
+    log.info('hangup', `goodbye finished playing, dropping the line (${reason})`);
+    shutdown(`agent ended the call: ${reason}`);
+  }
+
+  function saveNotes() {
+    try {
+      fs.mkdirSync('calls', { recursive: true });
+      const name = `${new Date().toISOString().replace(/[:.]/g, '-')}-${callSid || 'nosid'}.json`;
+      const record = { callSid, startedAt: new Date(startedAt).toISOString(), framesIn, framesOut, audioGaps, ...findings.toJSON() };
+      fs.writeFileSync(path.join('calls', name), JSON.stringify(record, null, 2));
+      log.info('saved', `calls/${name}`);
+    } catch (err) {
+      log.warn('saved', `could not write the call notes: ${err.message}`);
+    }
+  }
+
   function shutdown(why) {
     if (closed) return;
     closed = true;
     clearInterval(timer);
+    if (hangupTimer) clearTimeout(hangupTimer);
     log.info('shutdown', `${why} framesIn=${framesIn} framesOut=${framesOut} audioGaps=${audioGaps}`);
+    findings.print();
+    saveNotes();
     azure.close();
     try {
       twilioWs.close();
@@ -144,7 +213,7 @@ wss.on('connection', (twilioWs, req) => {
         callSid = msg.start.callSid;
         log.stage('TWILIO_STREAM_START', `callSid=${callSid} streamSid=${streamSid} codec=${msg.start.mediaFormat?.encoding}@${msg.start.mediaFormat?.sampleRate}`);
         azure.connect();
-        azure.speakFirst(GREETING);
+        azure.speakFirst(buildGreeting());
         break;
 
       case 'media': {

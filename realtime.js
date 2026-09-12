@@ -7,9 +7,11 @@ import * as log from './log.js';
 const PCMU = { type: 'audio/pcmu' };
 
 export class Realtime {
-  constructor({ tag = 'azure', instructions = '', onAudio, onBargeIn, onClose, onResponseStart, onTranscript } = {}) {
+  constructor({ tag = 'azure', instructions = '', tools = [], onToolCall, onAudio, onBargeIn, onClose, onResponseStart, onTranscript } = {}) {
     this.tag = tag;
     this.instructions = instructions;
+    this.tools = tools;
+    this.onToolCall = onToolCall || (() => ({ ok: false, error: 'no tool handler wired' }));
     this.onAudio = onAudio || (() => {});
     this.onBargeIn = onBargeIn || (() => {});
     this.onClose = onClose || (() => {});
@@ -28,6 +30,8 @@ export class Realtime {
     this.audioFramesThisResponse = 0;
     this.currentResponseId = null;
     this.pendingTranscript = null;
+    this.toolFollowUp = false;   // a tool ran, so the model owes us a reply
+    this.toolCallsThisResponse = 0;
   }
 
   connect() {
@@ -94,9 +98,11 @@ export class Realtime {
           },
           output: { format: PCMU, voice: cfg.voice, speed: cfg.speed },
         },
+        tools: this.tools,
+        tool_choice: 'auto',
       },
     });
-    log.stage('AZURE_SESSION_SENT', `voice=${cfg.voice} format=audio/pcmu vad=semantic`);
+    log.stage('AZURE_SESSION_SENT', `voice=${cfg.voice} format=audio/pcmu vad=semantic tools=${this.tools.length}`);
   }
 
   // Public so tests can drive it with fake events. Takes a parsed event.
@@ -116,6 +122,7 @@ export class Realtime {
 
       case 'response.created':
         this.audioFramesThisResponse = 0;
+        this.toolCallsThisResponse = 0;
         this.currentResponseId = ev.response?.id || null;
         this.onResponseStart(this.currentResponseId);
         // Tie the retry logic to this exact response id, so a reply triggered
@@ -139,6 +146,15 @@ export class Realtime {
           log.info('reply latency', `${ms}ms (${verdict})`);
         }
         this.onAudio(ev.delta, this.currentResponseId);
+        break;
+
+      // The model has decided to write something down. Run it, hand the result
+      // straight back, but do NOT ask for a reply yet - there is still a
+      // response in flight and Azure allows only one at a time.
+      case 'response.function_call_arguments.done':
+      case 'response.function_call_arguments.delta':
+        if (ev.type.endsWith('.delta')) break;
+        this.#handleToolCall(ev);
         break;
 
       case 'input_audio_buffer.speech_started':
@@ -203,6 +219,16 @@ export class Realtime {
         if (cancelled) this.onBargeIn();
         this.onTranscript(ev.response?.id || null, this.pendingTranscript ?? '', status);
         this.pendingTranscript = null;
+
+        // A tool ran during that response. The slot may have been refused, or
+        // the price may be over budget, and she needs to say so out loud. Now
+        // that the response is finished, it is safe to ask for another.
+        // Skipped when cancelled - the caller is mid-sentence and semantic VAD
+        // will start a reply on its own.
+        if (this.toolFollowUp) {
+          this.toolFollowUp = false;
+          if (!cancelled) setTimeout(() => this.#raw({ type: 'response.create' }), 0);
+        }
         break;
       }
 
@@ -213,6 +239,38 @@ export class Realtime {
       default:
         break;
     }
+  }
+
+  #handleToolCall(ev) {
+    const name = ev.name || '(unnamed)';
+    const callId = ev.call_id;
+    let args = {};
+    let parseError = null;
+    try {
+      args = ev.arguments ? JSON.parse(ev.arguments) : {};
+    } catch (err) {
+      parseError = err.message;
+    }
+
+    const result = parseError
+      ? { ok: false, error: `could not read those arguments as JSON: ${parseError}` }
+      : this.onToolCall(name, args);
+
+    this.toolCallsThisResponse++;
+    const verdict = result?.ok === false ? `REFUSED - ${result.error}` : 'ok';
+    log.info('agent noted', `${name} ${JSON.stringify(args).slice(0, 160)} -> ${verdict}`);
+
+    if (!callId) return log.warn('tool', `${name} arrived without a call_id, cannot answer it`);
+
+    this.#raw({
+      type: 'conversation.item.create',
+      item: {
+        type: 'function_call_output',
+        call_id: callId,
+        output: JSON.stringify(result ?? { ok: true }),
+      },
+    });
+    this.toolFollowUp = true;
   }
 
   #raw(obj) {

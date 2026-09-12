@@ -1,0 +1,151 @@
+// Tests for the notepad: what gets recorded, and what gets refused.
+//
+// These run without a phone, a tunnel or Azure. Every check here is a bug that
+// would otherwise only show up mid-call, in front of a real contractor.
+
+import { Findings } from './findings.js';
+import { TOOLS, runTool } from './tools.js';
+
+let pass = 0;
+let fail = 0;
+
+function ok(name, cond, detail = '') {
+  if (cond) {
+    pass++;
+    console.log(`  ok    ${name}`);
+  } else {
+    fail++;
+    console.log(`  FAIL  ${name}${detail ? '  <- ' + detail : ''}`);
+  }
+}
+
+// The real job's availability, as parsed from JOB_AVAILABILITY_WINDOWS.
+const job = {
+  client: 'Yihan Sun',
+  zip: '98053',
+  area: 'Redmond, WA',
+  issue: 'cooktop is dead',
+  budgetLow: 300,
+  budgetHigh: 400,
+  windows: [
+    { day: 'mon', startMin: 780, endMin: 900 }, { day: 'mon', startMin: 1020, endMin: 1200 },
+    { day: 'tue', startMin: 780, endMin: 900 }, { day: 'tue', startMin: 1020, endMin: 1200 },
+    { day: 'wed', startMin: 780, endMin: 900 }, { day: 'wed', startMin: 1020, endMin: 1200 },
+    { day: 'thu', startMin: 780, endMin: 900 }, { day: 'thu', startMin: 1020, endMin: 1200 },
+    { day: 'fri', startMin: 780, endMin: 900 }, { day: 'fri', startMin: 1020, endMin: 1200 },
+    { day: 'sat', startMin: 600, endMin: 1439 },
+  ],
+};
+
+const f = () => new Findings(job);
+
+console.log('\ntime slots');
+
+// The one that went wrong on a real call: Mia refused Thursday 1-2pm, which
+// sits squarely inside the 13:00-15:00 window. Nothing may refuse it.
+{
+  const r = f().noteTimeSlot({ day: 'thu', startTime: '13:00', endTime: '14:00' });
+  ok('thursday 1-2pm is accepted', r.ok === true, JSON.stringify(r));
+}
+ok('a full 1-3pm window is accepted', f().noteTimeSlot({ day: 'tue', startTime: '13:00', endTime: '15:00' }).ok === true);
+ok('evening 5-8pm is accepted', f().noteTimeSlot({ day: 'wed', startTime: '17:00', endTime: '20:00' }).ok === true);
+ok('saturday 10:30 is accepted', f().noteTimeSlot({ day: 'sat', startTime: '10:30', endTime: '12:00' }).ok === true);
+
+{
+  const r = f().noteTimeSlot({ day: 'mon', startTime: '09:00', endTime: '10:00' });
+  ok('a weekday morning is refused', r.ok === false);
+  ok('...and the refusal says what he is free for', /13:00-15:00/.test(r.error || ''), r.error);
+}
+ok('saturday before 10am is refused', f().noteTimeSlot({ day: 'sat', startTime: '09:00', endTime: '11:00' }).ok === false);
+ok('sunday is refused', f().noteTimeSlot({ day: 'sun', startTime: '13:00', endTime: '14:00' }).ok === false);
+ok('a slot that straddles the end of a window is refused', f().noteTimeSlot({ day: 'thu', startTime: '14:00', endTime: '16:00' }).ok === false);
+ok('end before start is refused', f().noteTimeSlot({ day: 'thu', startTime: '15:00', endTime: '13:00' }).ok === false);
+ok('a nonsense time is refused', f().noteTimeSlot({ day: 'thu', startTime: 'afternoon', endTime: '15:00' }).ok === false);
+ok('a nonsense day is refused', f().noteTimeSlot({ day: 'blursday', startTime: '13:00', endTime: '14:00' }).ok === false);
+
+console.log('\ndates on slots');
+{
+  // Build a date that really is the coming Thursday, so the test does not rot.
+  const d = new Date();
+  d.setDate(d.getDate() + ((4 - d.getDay() + 7) % 7 || 7));
+  const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const r = f().noteTimeSlot({ day: 'thu', date: iso, startTime: '13:00', endTime: '14:00' });
+  ok('a correct date is accepted', r.ok === true, JSON.stringify(r));
+
+  const wrong = f().noteTimeSlot({ day: 'fri', date: iso, startTime: '13:00', endTime: '14:00' });
+  ok('a date that is not that weekday is refused', wrong.ok === false, JSON.stringify(wrong));
+  ok('...and it says which weekday it really is', /is a thu/.test(wrong.error || ''), wrong.error);
+
+  const past = f().noteTimeSlot({ day: 'thu', date: '2020-01-02', startTime: '13:00', endTime: '14:00' });
+  ok('a date in the past is refused', past.ok === false);
+  ok('a malformed date is refused', f().noteTimeSlot({ day: 'thu', date: 'next thursday', startTime: '13:00', endTime: '14:00' }).ok === false);
+}
+
+console.log('\ncollecting two slots');
+{
+  const n = f();
+  const a = n.noteTimeSlot({ day: 'thu', startTime: '13:00', endTime: '15:00' });
+  ok('first slot says one more is needed', a.stillNeeded === 1, JSON.stringify(a));
+  const dup = n.noteTimeSlot({ day: 'thu', startTime: '13:00', endTime: '15:00' });
+  ok('the same slot twice does not count twice', n.slots.length === 1, JSON.stringify(dup));
+  const b = n.noteTimeSlot({ day: 'sat', startTime: '10:00', endTime: '12:00' });
+  ok('second slot clears the requirement', b.stillNeeded === 0);
+  const c = n.noteTimeSlot({ day: 'fri', startTime: '17:00', endTime: '19:00' });
+  ok('a valid third slot is still accepted', c.ok === true);
+}
+
+console.log('\nmoney and minutes');
+{
+  const n = f();
+  ok('a quote range is recorded', n.noteQuote({ lowUsd: 150, highUsd: 250 }).ok === true);
+  ok('...and is not flagged over budget', n.quote.overBudget === false);
+  ok('a quote above the budget is flagged', f().noteQuote({ lowUsd: 900 }).overBudget === true);
+  ok('a single figure fills both ends', (() => { const x = f(); x.noteQuote({ lowUsd: 200 }); return x.quote.highUsd === 200; })());
+  ok('a non-numeric price is refused', f().noteQuote({ lowUsd: 'a couple hundred' }).ok === false);
+  ok('a free call-out is recorded, not treated as missing', f().noteCallout({ feeUsd: 0 }).ok === true);
+  ok('a call-out with no number is refused', f().noteCallout({ feeUsd: 'depends' }).ok === false);
+  ok('a duration is recorded', f().noteJobDuration({ minMinutes: 60, maxMinutes: 90 }).ok === true);
+  ok('a 30 hour duration is refused', f().noteJobDuration({ minMinutes: 1800 }).ok === false);
+}
+
+console.log('\nrefusals and outcome');
+{
+  const n = f();
+  const r = n.noteDeclined({ topic: 'repair price', theirWords: 'I do not quote over the phone' });
+  ok('a refusal is recorded', r.ok === true);
+  ok('...and tells the agent to stop asking', /do not ask about that again/.test(r.note || ''), r.note);
+  n.noteServiceArea({ covers: false });
+  ok('an out of area answer is recorded', n.serviceArea.covers === false);
+  n.noteOutcome({ outcome: 'out_of_area', summary: 'they only do the east side' });
+  ok('the outcome is recorded', n.outcome.outcome === 'out_of_area');
+}
+
+console.log('\ntool dispatch');
+{
+  const n = f();
+  ok('every tool name maps to a handler', TOOLS.every((t) => t.name === 'end_call' || runTool(n, t.name, {}) !== undefined));
+  ok('an unknown tool is refused, not thrown', runTool(n, 'note_vibes', {}).ok === false);
+
+  let ended = null;
+  const r = runTool(n, 'end_call', { reason: 'said_goodbye' }, { onEndCall: (why) => (ended = why) });
+  ok('end_call reaches the server', ended === 'said_goodbye');
+  ok('end_call is recorded on the notes', n.hangup?.reason === 'said_goodbye');
+  ok('...and tells her to finish the goodbye first', /goodbye/.test(r.note || ''), r.note);
+
+  const r2 = runTool(n, 'note_time_slot', { day: 'mon', startTime: '08:00', endTime: '09:00' });
+  ok('a refused slot comes back with a reason she can say out loud', r2.ok === false && r2.error.length > 20);
+}
+
+console.log('\ntool schemas');
+{
+  ok('every tool has a name and a description', TOOLS.every((t) => t.name && t.description && t.type === 'function'));
+  ok('every tool has an object parameter schema', TOOLS.every((t) => t.parameters?.type === 'object'));
+  ok('every required field is actually declared', TOOLS.every((t) => (t.parameters.required || []).every((k) => k in t.parameters.properties)));
+  const money = TOOLS.filter((t) => t.name === 'note_quote' || t.name === 'note_callout');
+  ok('both money tools demand a read-back', money.every((t) => /say .*back/i.test(t.description)), money.map((t) => t.name).join());
+  const slot = TOOLS.find((t) => t.name === 'note_time_slot');
+  ok('the slot tool demands a read-back', /say the day, the date and the hour back/i.test(slot.description));
+}
+
+console.log(`\n${pass} passed, ${fail} failed\n`);
+process.exit(fail ? 1 : 0);
