@@ -47,6 +47,17 @@ line was silent. The agent can *decide* a time slot works — but code checks it
 against the availability window and refuses if it doesn't. It also literally
 cannot dial a number that didn't come from a structured API field.
 
+**A fourth, if there's time — the best bug of the day.** We hung up on a real
+contractor thirty seconds into a real conversation and filed it as "nobody
+answered". The code that hung up was working perfectly. We had configured
+Twilio's answering-machine detection to wait for a voicemail greeting to
+*finish*, so we could leave a message after the beep — a thing this product
+never does. The verdict arrived half a minute late, in the middle of a live
+conversation, and was obeyed. **The bug wasn't in the code; it was in choosing a
+mode designed for something we never do.** The first fix we wrote was a patch
+that would have broken real voicemail detection. The real fix was one word.
+Details in §8.
+
 The one genuine AI-behaviour bug we found, we found by reading transcripts
 rather than logs — and the fix was two lines. Details in §7.
 
@@ -281,7 +292,127 @@ indicate why. Preflight now *asserts* that what came back matches what we sent.
 
 ---
 
-## 8. Smaller things that cost real time
+## 8. We hung up on a man mid-conversation
+
+The single best story in this document, because the cause is so unintuitive.
+
+A test call: Mia introduces herself, Dave answers — *"Hi, this is Dave,
+Appliance Repair"* — gives his name twice more, and answers a question. Thirty
+seconds in, we hang up on him. The call is filed as **`no_answer`**.
+
+### Facts
+
+- Twilio has a feature called **AMD — Answering Machine Detection**. It listens
+  to the start of a call and reports back whether a human or a voicemail
+  answered. We used it so the agent wouldn't talk to an answering machine for a
+  full minute.
+- It has two modes. `Enable` answers one question — human or machine — as soon
+  as it knows, usually within a few seconds. `DetectMessageEnd` waits for a
+  machine to *finish its outgoing greeting*, so you can leave a message after
+  the beep.
+- We had chosen `DetectMessageEnd`. **We never leave a message** — the briefing
+  explicitly forbids it. So the mode bought us nothing at all, and cost us up to
+  thirty seconds of listening.
+- At +103.8s the verdict finally arrived: `machine_end_other`. By then a real
+  conversation had been running for half a minute. The code did as it was told
+  and hung up.
+
+### What we did about it
+
+The first fix was a patch: ignore a machine verdict if a person has already
+been talking. It was rejected for a good reason — it would have blocked a
+*genuine* voicemail whose greeting happened to transcribe as two turns. Patching
+the symptom was about to create a new bug.
+
+The base fix is one word. `machineDetection: 'Enable'`, plus
+`machineDetectionTimeout: 5`, so a verdict is always early and can never
+contradict a conversation already under way. A clock check on the callback
+ignores any verdict older than 15 seconds, in case the setting ever drifts.
+
+**The lesson for the demo:** the bug was not in the code that hung up. The code
+did exactly what it was configured to do. The bug was choosing a mode designed
+for a thing we never do.
+
+---
+
+## 9. Making her wait so she could hear
+
+Two faults with the same root: she was talking when she should have been
+listening.
+
+### She talked over the person answering the phone
+
+A business answers with a whole sentence — *"Appliance Repair, this is Dave
+speaking."* Mia started the instant the line connected, straight over the top of
+it. Only **37%** of her opening played before she was cut off, so the AI
+disclosure — the one sentence that must never be dropped — never reached him.
+Dave spent the next twenty seconds repeating his own name.
+
+She now waits two seconds before introducing herself, and the briefing tells her
+why: let them say who they are first.
+
+### Turn detection was set too patient
+
+Earlier in the day, to stop her answering an "mm-hm" as though it were a whole
+sentence, we set semantic VAD's `eagerness` to `low` — wait longer before
+deciding someone has finished talking.
+
+It backfired. On a live call her sense of when someone was speaking got so dull
+that the contractor barely registered: **three turns detected in thirty
+seconds**, while she delivered a nineteen-second monologue over the top of him.
+
+Reverted to `auto`. **Failing to hear someone is far worse than answering them
+twice** — and the double-reply it used to cause is now fixed properly, in the
+tool follow-up rule and in the briefing, rather than by making her deaf.
+
+A trap worth mentioning: the value was *also* pinned in `.env`, so changing the
+default in `config.js` did nothing. Preflight now prints the setting the model
+actually echoed back, so a stale override announces itself.
+
+---
+
+## 10. Notes that were confidently wrong
+
+Three bugs that produce *plausible* bad data, which is worse than a crash.
+
+### "An hour to maybe two days" was saved as "60 minutes"
+
+The contractor gave a range. The model passed it on correctly:
+`{minMinutes: 60, maxMinutes: 2880}`. The saved record read
+`{minMinutes: 60, maxMinutes: 60}`.
+
+A validator capped durations at 24 hours. 2,880 minutes failed the check and
+returned `null`, and the line `const max = this.#minutes(maxMinutes) ?? min;`
+quietly substituted the minimum. **The guard against bad data was the thing
+writing bad data.** Nobody saw an error, because there wasn't one.
+
+Fixed: the ceiling is two weeks, and a number we cannot use is now *refused out
+loud* rather than replaced with a wrong one.
+
+### A corrected appointment was stored beside the wrong one
+
+The contractor said *"Thursday, one to three"*, then corrected himself to *"one
+to two"*. Both were saved. The portal displayed the first two slots — showing
+the **uncorrected** window. The customer would have been given the wrong time.
+
+Fixed by arithmetic, not by interpreting speech: two slots that overlap on the
+same date cannot both be real, so the later one replaces the earlier, and the
+tool tells her it replaced it so she reads the right one back.
+
+### She answered her own question
+
+She recorded *"yes, they cover the area"* — from Dave saying **"Okay."** two
+seconds *before* her question had finished playing down the line. He was
+following along, not answering.
+
+The rule that catches this counts rather than interprets: the greeting asks
+nothing about the job, so until a second turn of hers has finished **and the
+caller actually heard it**, there is no question for anything to be the answer
+to. A question cut off before it played is not a question anyone answered.
+
+---
+
+## 11. Smaller things that cost real time
 
 ### A call died mid-sentence at 301 seconds
 `MAX_CALL_SECONDS` was 300. The agent was two exchanges from booking. Raised to
