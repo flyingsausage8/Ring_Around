@@ -29,6 +29,7 @@ export const STAGES = [
   'AZURE_AUDIO_IN',       // first audio appended to Azure
   'AZURE_AUDIO_OUT',      // first audio back from Azure
   'TWILIO_AUDIO_OUT',     // first audio pushed to the phone
+  'PLAYBACK_CONFIRMED',   // first audio Twilio says the caller actually heard
   'TWILIO_WS_CLOSE',      // phone side hung up
   'AZURE_WS_CLOSE',       // agent side closed
 ];

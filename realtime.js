@@ -7,12 +7,14 @@ import * as log from './log.js';
 const PCMU = { type: 'audio/pcmu' };
 
 export class Realtime {
-  constructor({ tag = 'azure', instructions = '', onAudio, onBargeIn, onClose } = {}) {
+  constructor({ tag = 'azure', instructions = '', onAudio, onBargeIn, onClose, onResponseStart, onTranscript } = {}) {
     this.tag = tag;
     this.instructions = instructions;
     this.onAudio = onAudio || (() => {});
     this.onBargeIn = onBargeIn || (() => {});
     this.onClose = onClose || (() => {});
+    this.onResponseStart = onResponseStart || (() => {});
+    this.onTranscript = onTranscript || (() => {});
     this.ws = null;
     this.ready = false;
     this.queued = [];
@@ -24,6 +26,8 @@ export class Realtime {
     this.greetingResponseId = null;
     this.awaitingGreetingId = false;
     this.audioFramesThisResponse = 0;
+    this.currentResponseId = null;
+    this.pendingTranscript = null;
   }
 
   connect() {
@@ -112,6 +116,8 @@ export class Realtime {
 
       case 'response.created':
         this.audioFramesThisResponse = 0;
+        this.currentResponseId = ev.response?.id || null;
+        this.onResponseStart(this.currentResponseId);
         // Tie the retry logic to this exact response id, so a reply triggered
         // by the caller talking can never be mistaken for the greeting.
         if (this.awaitingGreetingId) {
@@ -132,7 +138,7 @@ export class Realtime {
           const verdict = ms < 800 ? 'snappy' : ms < 1500 ? 'ok' : 'SLOW - caller will notice';
           log.info('reply latency', `${ms}ms (${verdict})`);
         }
-        this.onAudio(ev.delta);
+        this.onAudio(ev.delta, this.currentResponseId);
         break;
 
       case 'input_audio_buffer.speech_started':
@@ -153,9 +159,11 @@ export class Realtime {
         log.info('caller said', JSON.stringify(ev.transcript));
         break;
 
+      // What the model produced. NOT what the caller heard - that only becomes
+      // known once Twilio marks the audio as played. See playback.js.
       case 'response.output_audio_transcript.done':
       case 'response.audio_transcript.done':
-        log.info('agent said', JSON.stringify(ev.transcript));
+        this.pendingTranscript = ev.transcript;
         break;
 
       case 'response.done': {
@@ -185,6 +193,8 @@ export class Realtime {
         if (status && status !== 'completed') {
           log.warn('azure', `response ${status}: ${JSON.stringify(ev.response?.status_details || {}).slice(0, 300)}`);
         }
+        this.onTranscript(ev.response?.id || null, this.pendingTranscript ?? '', status);
+        this.pendingTranscript = null;
         break;
       }
 

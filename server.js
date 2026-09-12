@@ -2,6 +2,7 @@ import http from 'node:http';
 import { WebSocketServer } from 'ws';
 import { cfg, checkEnv } from './config.js';
 import { Realtime } from './realtime.js';
+import { Playback } from './playback.js';
 import { INSTRUCTIONS, GREETING } from './briefing.js';
 import * as log from './log.js';
 
@@ -67,19 +68,44 @@ wss.on('connection', (twilioWs, req) => {
   let framesOut = 0;
   let audioGaps = 0;
   let lastCallerAudio = Date.now();
+  let lastStreamMs = null;
   let closed = false;
+
+  const playback = new Playback({
+    onSettled: ({ text, totalMs, heardMs, heardFraction }) => {
+      if (!text) return;
+      const pct = Math.round(heardFraction * 100);
+      if (pct >= 99) {
+        log.info('caller heard', JSON.stringify(text));
+      } else if (heardMs < 150) {
+        log.warn('never heard', `${JSON.stringify(text)}  (cut off before any of it played)`);
+      } else {
+        log.warn('partly heard', `${pct}% played (${(heardMs / 1000).toFixed(1)}s of ${(totalMs / 1000).toFixed(1)}s): ${JSON.stringify(text)}`);
+      }
+    },
+  });
 
   const azure = new Realtime({
     instructions: INSTRUCTIONS,
-    onAudio: (b64) => {
+    onResponseStart: (id) => playback.startResponse(id),
+    onTranscript: (id, text, status) => playback.endResponse(id, text, status),
+    onAudio: (b64, responseId) => {
       if (!streamSid || twilioWs.readyState !== twilioWs.OPEN) return;
       twilioWs.send(JSON.stringify({ event: 'media', streamSid, media: { payload: b64 } }));
       framesOut++;
+      // Twilio echoes this mark back once the chunk has actually finished
+      // playing to the caller. That echo is the only honest signal we get.
+      const name = playback.queue(b64, responseId);
+      twilioWs.send(JSON.stringify({ event: 'mark', streamSid, mark: { name } }));
       log.once('TWILIO_AUDIO_OUT', `streamSid=${streamSid}`);
     },
     onBargeIn: () => {
       if (streamSid && twilioWs.readyState === twilioWs.OPEN) {
         twilioWs.send(JSON.stringify({ event: 'clear', streamSid }));
+      }
+      const dropped = playback.clear();
+      if (dropped > 200) {
+        log.warn('barge-in', `dropped ${(dropped / 1000).toFixed(1)}s of audio the caller never heard`);
       }
     },
     onClose: () => shutdown('azure closed'),
@@ -124,17 +150,31 @@ wss.on('connection', (twilioWs, req) => {
       case 'media': {
         framesIn++;
         const now = Date.now();
-        // Twilio sends a frame every 20ms. A long gap is the network
-        // stalling, not the caller going quiet - worth seeing in the log
-        // before you start blaming the model for "lag".
-        const gap = now - lastCallerAudio;
-        if (framesIn > 1 && gap > 400) {
-          audioGaps++;
-          log.warn('audio gap', `${gap}ms with no frame from Twilio (gap #${audioGaps})`);
+        // Twilio stamps every frame with ms since the stream started. That is
+        // the call's own clock, so gaps in it are real gaps on the line
+        // rather than this process being busy.
+        const streamMs = Number(msg.media?.timestamp);
+        if (Number.isFinite(streamMs)) {
+          if (lastStreamMs !== null) {
+            const gap = streamMs - lastStreamMs;
+            if (gap > 400) {
+              audioGaps++;
+              log.warn('audio gap', `${gap}ms with no frame from Twilio (gap #${audioGaps})`);
+            }
+          }
+          lastStreamMs = streamMs;
         }
         lastCallerAudio = now;
         log.once('CALLER_AUDIO_IN', `first frame, ${msg.media.payload.length} b64 chars`);
         if (azure.appendAudio(msg.media.payload)) log.once('AZURE_AUDIO_IN');
+        break;
+      }
+
+      // Twilio finished playing a chunk to the caller. This is the only
+      // event that tells us what was actually heard.
+      case 'mark': {
+        const lag = playback.confirmMark(msg.mark?.name);
+        if (lag !== null && log.once('PLAYBACK_CONFIRMED', `first chunk reached the caller ${lag}ms after we sent it`)) break;
         break;
       }
 
