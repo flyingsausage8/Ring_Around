@@ -27,6 +27,7 @@ export class Findings {
     this.outcome = null;
     this.hangup = null;        // why the agent ended the call
     this.badPickup = null;     // a machine answered, or nobody did
+    this.keysPressed = [];     // keypad presses, for menus and hold queues
     this.callerTurns = 0;      // how many times they have actually said something
     this.agentTurns = 0;       // how many of her own turns have finished
     this.lastCallerEmpty = true; // did the last thing we transcribed come back blank
@@ -266,6 +267,13 @@ export class Findings {
     return { ok: true };
   }
 
+  // What we pressed, and what we were told to press it for. A call that ended
+  // in a menu is worth being able to read back afterwards.
+  notePressedKeys(digits, why) {
+    this.keysPressed.push({ digits, why: why || null });
+    return { ok: true };
+  }
+
   // --- output --------------------------------------------------------------
 
   toJSON() {
@@ -285,6 +293,7 @@ export class Findings {
       outcome: this.outcome,
       hangup: this.hangup,
       badPickup: this.badPickup,
+      keysPressed: this.keysPressed,
     };
   }
 

@@ -307,6 +307,21 @@
 
     if (!items.length) { $('rows').innerHTML = '<div class="note">nothing queued</div>'; return; }
 
+    // This redraws every second or so, and replacing the HTML throws away
+    // where each transcript was scrolled to - so reading an old call was
+    // impossible, it snapped back to the top under your finger. Remember where
+    // every feed was, and put it back afterwards.
+    var wasAt = {};
+    var all = document.querySelectorAll('[data-feed]');
+    for (var n = 0; n < all.length; n++) {
+      wasAt[all[n].getAttribute('data-feed')] = {
+        top: all[n].scrollTop,
+        // "Was it already at the bottom?" decides whether a live call is
+        // allowed to keep following along. Scroll up and it stops chasing you.
+        atEnd: all[n].scrollHeight - all[n].scrollTop - all[n].clientHeight < 24
+      };
+    }
+
     $('rows').innerHTML = items.map(function (x, i) {
       var active = x.status === 'calling';
       var lines = active ? liveFeed : linesFor(x);
@@ -321,11 +336,12 @@
       // first, with the words kept underneath so a number can be checked
       // against what was actually said.
       var body = '';
+      var key = x.files || ('row' + i);
       if (active) {
-        body = '<div class="feed" id="feed">' + renderLines(lines) + '</div>';
+        body = '<div class="feed" id="feed" data-feed="' + esc(key) + '">' + renderLines(lines) + '</div>';
       } else {
         if (x.findings) body += '<div class="results">' + renderFindings(x.findings) + '</div>';
-        if (lines && lines.length) body += '<div class="feed done">' + renderLines(lines) + '</div>';
+        if (lines && lines.length) body += '<div class="feed done" data-feed="' + esc(key) + '">' + renderLines(lines) + '</div>';
         // Nothing on disk is a real answer, not a reason to sit on "loading"
         // forever. The oldest calls were made before transcripts were saved.
         else if (x.files && feeds[x.files]) body += '<div class="note">no transcript was saved for this call</div>';
@@ -340,8 +356,20 @@
         body + '</div>';
     }).join('');
 
-    var feed = $('feed');
-    if (feed) feed.scrollTop = feed.scrollHeight;
+    var now = document.querySelectorAll('[data-feed]');
+    for (var m = 0; m < now.length; m++) {
+      var el = now[m];
+      var prev = wasAt[el.getAttribute('data-feed')];
+      if (!prev) {
+        // First time we have drawn this one. A call in progress should show
+        // its newest line; an old call should start at the beginning.
+        el.scrollTop = el.id === 'feed' ? el.scrollHeight : 0;
+      } else if (el.id === 'feed' && prev.atEnd) {
+        el.scrollTop = el.scrollHeight;
+      } else {
+        el.scrollTop = prev.top;
+      }
+    }
   }
 
   // Seven rows all called "my phone" are impossible to tell apart without it.

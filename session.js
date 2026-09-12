@@ -13,6 +13,7 @@ import { Playback } from './playback.js';
 import { Findings } from './findings.js';
 import { Transcript } from './transcript.js';
 import { TOOLS, runTool } from './tools.js';
+import { dtmfFrames, dtmfDurationMs } from './dtmf.js';
 import { buildInstructions, buildGreeting } from './briefing.js';
 import * as log from './log.js';
 
@@ -29,6 +30,8 @@ export class CallSession {
     this.audioGaps = 0;
     this.lastCallerAudio = Date.now();
     this.lastStreamMs = null;
+    this.holdUntil = 0; // deliberate silence: on hold, or waiting for a menu
+
     this.closed = false;
     this.responsesInFlight = 0;
     this.hangupReason = null;
@@ -73,7 +76,11 @@ export class CallSession {
       instructions: buildInstructions(),
       tools: TOOLS,
       onToolCall: (name, args) => {
-        const result = runTool(this.findings, name, args, { onEndCall: (r) => this.requestHangup(r) });
+        const result = runTool(this.findings, name, args, {
+          onEndCall: (r) => this.requestHangup(r),
+          onPressKeys: (digits, why) => this.pressKeys(digits, why),
+          onHold: (seconds, why) => this.holdFor(seconds, why),
+        });
         this.transcript.tool(name, args, result);
         return result;
       },
@@ -128,7 +135,11 @@ export class CallSession {
 
     // Nothing but silence since pickup. Not a person, or not one who is going
     // to talk to us. Counting seconds, not interpreting anything.
-    if (!this.heardAPerson && totalSec > cfg.deadAirSeconds) {
+    //
+    // Unless we are deliberately holding. A queue is silence on purpose, and
+    // hanging up on "please wait for the next available agent" is exactly the
+    // mistake this guard used to cause.
+    if (!this.heardAPerson && totalSec > cfg.deadAirSeconds && Date.now() >= this.holdUntil) {
       log.warn('bad pickup', `${Math.round(totalSec)}s and nobody has said a word - hanging up`);
       this.findings.noteOutcome({ outcome: 'no_answer', summary: `nobody spoke in the first ${Math.round(totalSec)} seconds` });
       return this.requestHangup('no_one_there');
@@ -230,6 +241,39 @@ export class CallSession {
       this.hangupTimer = setTimeout(tick, 250);
     };
     this.hangupTimer = setTimeout(tick, 250);
+  }
+
+  // Press buttons on the keypad. The tones go out the same pipe as speech, so
+  // anything she is mid-sentence about is cleared first - a menu listening for
+  // a keypress should hear the keypress, not a sentence with a beep in it.
+  pressKeys(digits, why) {
+    if (!this.streamSid || this.ws.readyState !== this.ws.OPEN) return;
+
+    this.azure.cancelResponse();
+    this.ws.send(JSON.stringify({ event: 'clear', streamSid: this.streamSid }));
+    this.playback.clear();
+
+    const frames = dtmfFrames(digits);
+    for (const payload of frames) {
+      this.ws.send(JSON.stringify({ event: 'media', streamSid: this.streamSid, media: { payload } }));
+      this.framesOut++;
+    }
+    const ms = dtmfDurationMs(digits);
+    // A menu that just took our keys is a live line, whatever the silence
+    // meter thinks, so give it room to answer.
+    this.holdFor(45, `waiting for the menu after pressing ${digits}`);
+    log.stage('DTMF_SENT', `pressed ${digits} (${frames.length} frames, ${ms}ms)${why ? ` - ${why}` : ''}`);
+    this.transcript.event(`pressed ${digits}${why ? ` - ${why}` : ''}`);
+  }
+
+  // Deliberately waiting. Holds off the silence-means-nobody-there guard for
+  // as long as she asked for, and no longer.
+  holdFor(seconds, why) {
+    const until = Date.now() + seconds * 1000;
+    if (until <= this.holdUntil) return;
+    this.holdUntil = until;
+    log.stage('ON_HOLD', `waiting ${seconds}s${why ? ` - ${why}` : ''}`);
+    this.transcript.event(`waiting on hold for ${seconds}s${why ? ` - ${why}` : ''}`);
   }
 
   // Stop pressed. No waiting for a goodbye - the point of the red button is

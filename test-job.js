@@ -4,8 +4,15 @@
 // These are the guards that stand between a customer typing something odd and
 // a real contractor being told something wrong, so they are worth checking one
 // by one.
+//
+// Pointed at a scratch file first. This suite resets the job on purpose, and
+// it used to do that to the real one - running the tests wiped whatever a
+// customer had just typed into step 1.
 
-import { updateJob, resetJob, getJob, missingFields, isReady, describeWindows, fmtTime } from './job.js';
+import fs from 'node:fs';
+
+process.env.RING_JOB_FILE = 'job.test.json';
+const { updateJob, resetJob, getJob, missingFields, isReady, describeWindows, fmtTime } = await import('./job.js');
 
 let passed = 0;
 let failed = 0;
@@ -87,5 +94,6 @@ check('starting over forgets the times', getJob().windows, []);
 check('starting over keeps the search radius', typeof getJob().radiusMeters, 'number');
 
 resetJob();
+try { fs.unlinkSync('job.test.json'); } catch { /* it may never have been written */ }
 console.log(`\n${passed} passed, ${failed} failed\n`);
 process.exit(failed ? 1 : 0);

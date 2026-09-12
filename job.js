@@ -15,7 +15,7 @@ import path from 'node:path';
 import { cfg, parseWindows } from './config.js';
 import * as log from './log.js';
 
-const FILE = path.join(process.cwd(), 'job.json');
+const FILE = path.join(process.cwd(), process.env.RING_JOB_FILE || 'job.json');
 const DAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
 
 // What must be known before we are willing to call anybody. Everything else is

@@ -9,6 +9,11 @@
 
 import { loadFixture, searchPlaces, discover, assertProvenance, toE164, rank, score } from './discovery.js';
 
+// A test must not depend on whatever job happens to be loaded on this machine.
+// It used to borrow the one from .env, and every search here quietly broke the
+// day step 1 started with a blank job instead.
+const TEST_JOB = { area: 'Redmond, WA', zip: '98052', lat: 47.674, lng: -122.121, radiusMeters: 30000 };
+
 let pass = 0;
 let fail = 0;
 function ok(name, cond, detail = '') {
@@ -77,7 +82,7 @@ function fakeFetch(payload, { status = 200 } = {}) {
 
 {
   const list = await searchPlaces({
-    key: 'test-key',
+    key: 'test-key', job: TEST_JOB,
     area: 'Redmond WA',
     fetchImpl: fakeFetch({
       places: [
@@ -104,7 +109,7 @@ function fakeFetch(payload, { status = 200 } = {}) {
   // The important one: a business whose number only appears in prose. There is
   // no structured field, so there is no number, full stop.
   const list = await searchPlaces({
-    key: 'test-key',
+    key: 'test-key', job: TEST_JOB,
     fetchImpl: fakeFetch({
       places: [
         { id: 'p1', displayName: { text: 'No Phone Co' }, formattedAddress: 'Call us on 425-555-0199!', businessStatus: 'OPERATIONAL' },
@@ -118,7 +123,7 @@ function fakeFetch(payload, { status = 200 } = {}) {
 
 {
   const list = await searchPlaces({
-    key: 'test-key',
+    key: 'test-key', job: TEST_JOB,
     fetchImpl: fakeFetch({
       places: [
         { id: 'p1', displayName: { text: 'Closed Co' }, nationalPhoneNumber: '425-555-0103', businessStatus: 'CLOSED_PERMANENTLY' },
@@ -136,21 +141,21 @@ function fakeFetch(payload, { status = 200 } = {}) {
     nationalPhoneNumber: `425-555-${String(1000 + i).slice(-4)}`,
     businessStatus: 'OPERATIONAL',
   }));
-  const list = await searchPlaces({ key: 'test-key', limit: 10, fetchImpl: fakeFetch({ places: many }) });
+  const list = await searchPlaces({ key: 'test-key', job: TEST_JOB, limit: 10, fetchImpl: fakeFetch({ places: many }) });
   ok('ten is what we asked for and ten is what we get', list.length === 10);
 }
 
 console.log('\nwhen places breaks, it breaks loudly');
 {
-  const denied = await throws(() => searchPlaces({ key: 'bad', fetchImpl: fakeFetch('{"error":{"message":"key not authorized"}}', { status: 403 }) }));
+  const denied = await throws(() => searchPlaces({ key: 'bad', job: TEST_JOB, fetchImpl: fakeFetch('{"error":{"message":"key not authorized"}}', { status: 403 }) }));
   ok('an HTTP error throws', denied !== null);
   ok('...and says what came back', /403/.test(denied || ''), denied);
 
-  const garbage = await throws(() => searchPlaces({ key: 'k', fetchImpl: fakeFetch('<html>oops</html>') }));
+  const garbage = await throws(() => searchPlaces({ key: 'k', job: TEST_JOB, fetchImpl: fakeFetch('<html>oops</html>') }));
   ok('a non-JSON response throws', garbage !== null);
 
   const offline = await throws(() =>
-    searchPlaces({ key: 'k', fetchImpl: async () => { throw new Error('getaddrinfo ENOTFOUND'); } }),
+    searchPlaces({ key: 'k', job: TEST_JOB, fetchImpl: async () => { throw new Error('getaddrinfo ENOTFOUND'); } }),
   );
   ok('a network failure throws', offline !== null);
 
@@ -174,7 +179,7 @@ console.log('\nwhat we ask Google for');
 {
   let captured = null;
   await searchPlaces({
-    key: 'test-key',
+    key: 'test-key', job: TEST_JOB,
     query: 'appliance repair',
     area: 'Redmond WA 98053',
     fetchImpl: async (url, opts) => {
@@ -223,3 +228,4 @@ console.log('\nranking');
 
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);
+
