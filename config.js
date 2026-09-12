@@ -24,12 +24,23 @@ export const cfg = {
   publicHost: (process.env.PUBLIC_HOST || '').replace(/^https?:\/\//, '').replace(/\/$/, ''),
   port: Number(process.env.PORT || 8080),
 
+  agentName: process.env.AGENT_NAME || 'Sam',
   voice: process.env.AGENT_VOICE || 'marin',
   eagerness: process.env.AGENT_EAGERNESS || 'auto',
   speed: Number(process.env.AGENT_SPEED || 1),
   temperature: Number(process.env.AGENT_TEMPERATURE || 0.8),
   idleHangupSeconds: Number(process.env.IDLE_HANGUP_SECONDS || 20),
   maxCallSeconds: Number(process.env.MAX_CALL_SECONDS || 180),
+
+  // The demo job the agent is calling about. Placeholder until discovery
+  // feeds real jobs in.
+  job: {
+    client: process.env.JOB_CLIENT || 'the client',
+    address: process.env.JOB_ADDRESS || 'an address in the area',
+    phone: process.env.JOB_PHONE || 'a number I can share',
+    availability: process.env.JOB_AVAILABILITY || 'most weekday afternoons',
+    issue: process.env.JOB_ISSUE || 'a fridge that has stopped cooling properly',
+  },
 };
 
 // GA path. /openai/realtime?deployment= is preview only and 404s here.

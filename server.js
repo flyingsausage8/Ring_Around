@@ -2,20 +2,10 @@ import http from 'node:http';
 import { WebSocketServer } from 'ws';
 import { cfg, checkEnv } from './config.js';
 import { Realtime } from './realtime.js';
+import { INSTRUCTIONS, GREETING } from './briefing.js';
 import * as log from './log.js';
 
 if (!checkEnv()) process.exit(1);
-
-// No briefing yet - this is the "does the wire work" build.
-const INSTRUCTIONS = [
-  'You are on a live phone call. Speak English.',
-  'Talk like a person: short sentences, contractions, a little filler.',
-  'Never say you are an AI assistant unless you are asked directly.',
-  'This is a plumbing test of the phone line, so just chat naturally',
-  'and keep the conversation going.',
-].join(' ');
-
-const GREETING = 'Say hi, say the line is working, and ask how they are doing. One or two sentences.';
 
 function twiml() {
   const url = `wss://${cfg.publicHost}/media`;
