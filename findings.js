@@ -22,6 +22,23 @@ export class Findings {
     this.declined = [];        // what they would not answer, so we stop asking
     this.outcome = null;
     this.hangup = null;        // why the agent ended the call
+    this.callerTurns = 0;      // how many times they have actually said something
+    this.lastCallerEmpty = true; // did the last thing we transcribed come back blank
+  }
+
+  // Fed from the transcriber. Counting turns and checking whether text came
+  // back blank - no reading of what was said.
+  noteCallerTurn(text) {
+    const said = String(text ?? '').trim();
+    this.lastCallerEmpty = said.length === 0;
+    if (!this.lastCallerEmpty) this.callerTurns++;
+    return this.callerTurns;
+  }
+
+  // Some decisions end the call. Those must not rest on a transcript that came
+  // back empty, which is what silence, a cough or a bad line look like.
+  heardSomething() {
+    return this.callerTurns > 0 && !this.lastCallerEmpty;
   }
 
   // --- helpers -------------------------------------------------------------
@@ -39,6 +56,17 @@ export class Findings {
   // --- tool handlers -------------------------------------------------------
 
   noteServiceArea({ covers, theirWords }) {
+    // "They do not cover it" ends the call, so it is the one answer we refuse
+    // to take on faith. If the last thing we transcribed was blank, they did
+    // not answer - the line was quiet, or it was a cough, or they had not
+    // finished. Ask again rather than hanging up on someone mid-sentence.
+    if (covers === false && !this.heardSomething()) {
+      return {
+        ok: false,
+        error:
+          'you have not actually heard them answer that yet - the line was quiet. Ask whether they cover the area, wait for a real answer, and only then record it.',
+      };
+    }
     this.serviceArea = { covers: !!covers, theirWords };
     return { ok: true };
   }

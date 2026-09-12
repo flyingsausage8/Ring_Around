@@ -120,6 +120,36 @@ console.log('\nend_call');
   ok('the line is not dropped by the tool itself', h.findings.hangup !== null);
 }
 
+console.log('\nthe caller transcript reaches the notepad');
+{
+  const sent = [];
+  const findings = new Findings(job);
+  const rt = new Realtime({
+    tools: TOOLS,
+    onToolCall: (name, args) => runTool(findings, name, args),
+    onCallerTranscript: (text) => findings.noteCallerTurn(text),
+  });
+  rt.ws = { readyState: 1, send: (s) => sent.push(JSON.parse(s)) };
+  rt.ready = true;
+
+  // Exactly what happened on the real call: a blank transcript, then the model
+  // deciding that silence meant "no".
+  rt.onAzureEvent({ type: 'conversation.item.input_audio_transcription.completed', transcript: '' });
+  rt.onAzureEvent({ type: 'response.created', response: { id: 'r1' } });
+  rt.onAzureEvent({
+    type: 'response.function_call_arguments.done',
+    name: 'note_service_area',
+    call_id: 'c1',
+    arguments: JSON.stringify({ covers: false, theirWords: 'Okay' }),
+  });
+  const out = JSON.parse(sent.find((m) => m.type === 'conversation.item.create').item.output);
+  ok('a blank transcript blocks the call-ending verdict end to end', out.ok === false, JSON.stringify(out));
+
+  rt.onAzureEvent({ type: 'conversation.item.input_audio_transcription.completed', transcript: 'No, we stay in Seattle.' });
+  ok('a real answer gets through', findings.heardSomething() === true);
+  ok('...and turns are counted', findings.callerTurns === 1);
+}
+
 console.log('\nthe session Azure is given');
 {
   const { rt, sent } = harness();

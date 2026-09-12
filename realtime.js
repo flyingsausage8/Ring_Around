@@ -7,11 +7,12 @@ import * as log from './log.js';
 const PCMU = { type: 'audio/pcmu' };
 
 export class Realtime {
-  constructor({ tag = 'azure', instructions = '', tools = [], onToolCall, onAudio, onBargeIn, onClose, onResponseStart, onTranscript } = {}) {
+  constructor({ tag = 'azure', instructions = '', tools = [], onToolCall, onCallerTranscript, onAudio, onBargeIn, onClose, onResponseStart, onTranscript } = {}) {
     this.tag = tag;
     this.instructions = instructions;
     this.tools = tools;
     this.onToolCall = onToolCall || (() => ({ ok: false, error: 'no tool handler wired' }));
+    this.onCallerTranscript = onCallerTranscript || (() => {});
     this.onAudio = onAudio || (() => {});
     this.onBargeIn = onBargeIn || (() => {});
     this.onClose = onClose || (() => {});
@@ -176,6 +177,7 @@ export class Realtime {
 
       case 'conversation.item.input_audio_transcription.completed':
         log.info('caller said', JSON.stringify(ev.transcript));
+        this.onCallerTranscript(ev.transcript ?? '');
         break;
 
       // What the model produced. NOT what the caller heard - that only becomes

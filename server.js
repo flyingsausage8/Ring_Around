@@ -98,6 +98,7 @@ wss.on('connection', (twilioWs, req) => {
     instructions: buildInstructions(),
     tools: TOOLS,
     onToolCall: (name, args) => runTool(findings, name, args, { onEndCall: requestHangup }),
+    onCallerTranscript: (text) => findings.noteCallerTurn(text),
     onResponseStart: (id) => {
       responsesInFlight++;
       playback.startResponse(id);

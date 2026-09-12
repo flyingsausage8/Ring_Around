@@ -108,12 +108,60 @@ console.log('\nmoney and minutes');
   ok('a 30 hour duration is refused', f().noteJobDuration({ minMinutes: 1800 }).ok === false);
 }
 
+console.log('\nsilence is not an answer');
+{
+  // This is the bug that hung up on a real caller mid-sentence: Whisper
+  // returned an empty transcript, the model read that nothing as "no, we
+  // don't cover you", and the call ended while they were still talking.
+  const n = f();
+  n.noteCallerTurn('');
+  const r = n.noteServiceArea({ covers: false, theirWords: 'Okay' });
+  ok('out of area cannot be recorded off a blank transcript', r.ok === false, JSON.stringify(r));
+  ok('...and it tells her to go and ask properly', /ask/i.test(r.error || ''), r.error);
+  ok('...and nothing was written down', n.serviceArea === null);
+
+  const e = runTool(n, 'end_call', { reason: 'out_of_area' });
+  ok('and she cannot hang up on silence either', e.ok === false, JSON.stringify(e));
+  ok('...so the line stays open', n.hangup === null);
+}
+{
+  // The same guard must not get in the way of a real answer.
+  const n = f();
+  n.noteCallerTurn('No, we only cover Seattle proper.');
+  ok('a real out of area answer still records', n.noteServiceArea({ covers: false }).ok === true);
+  let ended = null;
+  ok('...and she can hang up on it', runTool(n, 'end_call', { reason: 'out_of_area' }, { onEndCall: (r) => (ended = r) }).ok !== false);
+  ok('...and the server is told', ended === 'out_of_area');
+}
+{
+  // "Yes we cover you" does not end the call, so it never needs the guard.
+  const n = f();
+  n.noteCallerTurn('');
+  ok('a yes is recorded even on a patchy line', n.noteServiceArea({ covers: true }).ok === true);
+}
+{
+  // Saying goodbye at the natural end of a call rests on nothing they said.
+  const n = f();
+  ok('a normal goodbye is never blocked', runTool(n, 'end_call', { reason: 'said_goodbye' }).ok !== false);
+  const h = f();
+  ok('a hostile caller can always be let go', runTool(h, 'end_call', { reason: 'hostile' }).ok !== false);
+}
+{
+  // A later silence must not wipe out an answer they already gave.
+  const n = f();
+  n.noteCallerTurn('Yeah we cover Redmond.');
+  n.noteCallerTurn('');
+  ok('a blank turn after a real one still blocks a call-ending verdict', n.noteServiceArea({ covers: false }).ok === false);
+  ok('...because the thing we just heard was nothing', n.heardSomething() === false);
+}
+
 console.log('\nrefusals and outcome');
 {
   const n = f();
   const r = n.noteDeclined({ topic: 'repair price', theirWords: 'I do not quote over the phone' });
   ok('a refusal is recorded', r.ok === true);
   ok('...and tells the agent to stop asking', /do not ask about that again/.test(r.note || ''), r.note);
+  n.noteCallerTurn('We do not go out that far, sorry.');
   n.noteServiceArea({ covers: false });
   ok('an out of area answer is recorded', n.serviceArea.covers === false);
   n.noteOutcome({ outcome: 'out_of_area', summary: 'they only do the east side' });

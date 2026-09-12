@@ -201,6 +201,17 @@ const HANDLERS = {
 export function runTool(findings, name, args, hooks = {}) {
   if (name === 'end_call') {
     const reason = String((args && args.reason) || 'said_goodbye');
+    // Ending the call because of something they supposedly said needs them to
+    // have actually said it. A blank transcript is not a refusal, an
+    // out-of-area or a wrong trade - it is just silence on a phone line.
+    const restsOnTheirWords =
+      reason === 'out_of_area' || reason === 'wrong_trade' || reason === 'they_asked' || reason === 'bad_time';
+    if (restsOnTheirWords && !findings.heardSomething()) {
+      return {
+        ok: false,
+        error: `you have not heard them say anything that supports "${reason}" - the line went quiet. Check in with them and wait for a real answer before ending the call.`,
+      };
+    }
     findings.noteHangup(reason);
     if (typeof hooks.onEndCall === 'function') hooks.onEndCall(reason);
     // The line does not drop here. server.js waits for the goodbye to finish
