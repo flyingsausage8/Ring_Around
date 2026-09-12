@@ -1,0 +1,10 @@
+.env
+node_modules/
+*.log
+cloudflared.exe
+
+# Real calls with real people's numbers in them.
+calls/
+
+# Real businesses.
+contractors.local.json
