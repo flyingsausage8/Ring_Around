@@ -80,6 +80,11 @@
   button.tiny { font-size: 11px; padding: 3px 9px; margin: 0; text-transform: none; letter-spacing: 0; }
   .needed { margin-top: 14px; padding-top: 12px; border-top: 1px solid #2a2e35; color: #f5c77e; font-size: 12px; }
   .needed.done { color: #81c995; }
+
+  .opt { font-size: 13px; color: #9aa0a6; margin-left: 10px; user-select: none; cursor: pointer; }
+  .opt input { vertical-align: -1px; margin-right: 4px; cursor: pointer; }
+  tr.spent td { color: #6f757d; }
+  tr.spent td.done { color: #81c995; }
 </style>
 
 <h1>Ring Around</h1>
@@ -112,8 +117,8 @@
 <div class="step off" id="step2">
   <div class="steplabel">Step 2 &middot; Shops found <span class="note">ranked by stars &times; (1 + log10(reviews)/10)</span></div>
   <table class="shops">
-    <thead><tr><th>#</th><th>Company</th><th>Phone</th><th>Rating</th><th>Reviews</th><th>Score</th></tr></thead>
-    <tbody id="shops"><tr><td colspan="6" class="note">waiting</td></tr></tbody>
+    <thead><tr><th>#</th><th>Company</th><th>Phone</th><th>Rating</th><th>Reviews</th><th>Score</th><th>Called</th></tr></thead>
+    <tbody id="shops"><tr><td colspan="7" class="note">waiting</td></tr></tbody>
   </table>
 </div>
 
@@ -125,6 +130,8 @@
     <button id="startPhone" class="go">Start (call my phone)</button>
     <button id="pause">Pause</button>
     <button id="stop" class="danger">Stop</button>
+    <label class="opt"><input type="checkbox" id="callEveryone" /> call everyone again</label>
+    <label class="opt"><input type="checkbox" id="follow" checked /> follow the live call</label>
     <span class="note" id="queueNote"></span>
   </div>
   <div id="rows" style="margin-top:16px"></div>
@@ -285,11 +292,18 @@
   };
 
   function drawShops() {
-    if (!shops.length) { $('shops').innerHTML = '<tr><td colspan="6" class="note">nothing found</td></tr>'; return; }
+    if (!shops.length) { $('shops').innerHTML = '<tr><td colspan="7" class="note">nothing found</td></tr>'; return; }
     $('shops').innerHTML = shops.map(function (c, i) {
-      return '<tr><td>' + (i + 1) + '</td><td>' + esc(c.name) + '</td><td>' + esc(c.phone) +
+      // A company we have finished with is greyed out, with what they said, so
+      // it is obvious why the queue is about to walk past them.
+      var before = c.calledBefore
+        ? (c.finished ? '<span class="ok">' : '<span class="note">') +
+          esc(c.calledBefore.lastOutcome) +
+          (c.calledBefore.attempts > 1 ? ' \u00d7' + c.calledBefore.attempts : '') + '</span>'
+        : '';
+      return '<tr class="' + (c.finished ? 'spent' : '') + '"><td>' + (i + 1) + '</td><td>' + esc(c.name) + '</td><td>' + esc(c.phone) +
         '</td><td>' + (c.rating != null ? c.rating + '★' : '') + '</td><td>' + (c.reviews != null ? c.reviews : '') +
-        '</td><td>' + (c.score ? c.score.toFixed(2) : '') + '</td></tr>';
+        '</td><td>' + (c.score ? c.score.toFixed(2) : '') + '</td><td class="done">' + before + '</td></tr>';
     }).join('');
   }
 
@@ -350,7 +364,7 @@
 
       var when = x.startedAt ? '<span class="note">' + esc(clock(x.startedAt)) + '</span>' : '';
 
-      return '<div class="row ' + (active ? 'active' : '') + '">' +
+      return '<div class="row ' + (active ? 'active' : '') + '"' + (active ? ' id="activerow"' : '') + '>' +
         '<div class="rowhead"><span class="n">' + (i + 1) + '</span><span class="name">' + esc(x.name) +
         '</span><span class="phone">' + esc(x.phone) + '</span><span class="right">' + when + dur + right + '</span></div>' +
         body + '</div>';
@@ -370,6 +384,23 @@
         el.scrollTop = prev.top;
       }
     }
+
+    followLiveCall();
+  }
+
+  // Bring the call that is happening now into view. Only when it changes -
+  // scrolling the page under someone every second while they are reading is
+  // worse than not scrolling at all - and only while "follow" is ticked, so
+  // there is always a way to opt out and read an earlier call in peace.
+  var followingKey = null;
+  function followLiveCall() {
+    var row = $('activerow');
+    if (!row) { followingKey = null; return; }
+    var key = row.querySelector('.name') ? row.querySelector('.name').textContent : 'live';
+    if (key === followingKey) return;
+    followingKey = key;
+    if (!$('follow').checked) return;
+    row.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
   // Seven rows all called "my phone" are impossible to tell apart without it.
@@ -573,7 +604,7 @@
 
   $('startShops').onclick = function () {
     feeds = {};
-    go({ mode: 'contractors', targets: shops });
+    go({ mode: 'contractors', targets: shops, callEveryone: $('callEveryone').checked });
   };
   $('startPhone').onclick = function () {
     feeds = {};
@@ -594,6 +625,12 @@
           $('queueNote').innerHTML = '<span class="err">' + esc(r.error) + '</span>';
           pendingNote = true;
           setTimeout(function () { pendingNote = false; }, 6000);
+        } else if (r && r.skipped && r.skipped.length) {
+          // Silently calling fewer people than the list shows is the kind of
+          // thing that looks like a bug. Say who, and why.
+          $('queueNote').textContent = 'skipping ' + r.skipped.length + ' already spoken to: ' + r.skipped.join(', ');
+          pendingNote = true;
+          setTimeout(function () { pendingNote = false; }, 10000);
         }
         return refresh();
       })

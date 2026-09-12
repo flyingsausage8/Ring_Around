@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "node test-greeting.js && node test-playback.js && node test-dtmf.js && node test-tools.js && node test-toolcall.js && node test-discovery.js && node test-queue.js && node test-job.js",
+    "test": "node test-greeting.js && node test-playback.js && node test-dtmf.js && node test-tools.js && node test-toolcall.js && node test-discovery.js && node test-calllog.js && node test-queue.js && node test-job.js",
     "start": "node server.js",
     "preflight": "node preflight.js",
     "call": "node call.js",

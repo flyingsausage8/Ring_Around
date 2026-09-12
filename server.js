@@ -8,6 +8,7 @@ import { CallQueue } from './queue.js';
 import { makeDialer, claimPending, assertReachable } from './dialer.js';
 import { discover, loadFixture, rank } from './discovery.js';
 import { getJob, resetJob, missingFields, isReady, describeWindows } from './job.js';
+import { annotate, split } from './calllog.js';
 import { intakeTurn, locate } from './intake.js';
 import * as log from './log.js';
 
@@ -315,8 +316,13 @@ const server = http.createServer(async (req, res) => {
         return json(res, 400, { ok: false, error: `step 1 is not finished - still need: ${gaps.join(', ')}` });
       }
       const list = source === 'fixture' ? rank(loadFixture()) : await discover({ ...body, source: 'places' });
-      broadcast('contractors', { source, contractors: list });
-      return json(res, 200, { ok: true, source, contractors: list });
+      // Say who we have already finished with, so the page can grey them out
+      // and the queue can leave them alone.
+      const marked = annotate(list, path.join(process.cwd(), 'calls'));
+      const done = marked.filter((c) => c.finished).length;
+      if (done) log.info('discovery', `${done} of ${marked.length} have already been spoken to`);
+      broadcast('contractors', { source, contractors: marked });
+      return json(res, 200, { ok: true, source, contractors: marked, alreadyDone: done });
     } catch (err) {
       return json(res, 500, { ok: false, error: err.message });
     }
@@ -346,6 +352,25 @@ const server = http.createServer(async (req, res) => {
         return json(res, 400, { ok: false, error: `step 1 is not finished - still need: ${gaps.join(', ')}` });
       }
 
+      // Nobody gets rung twice about the same job. A contractor who already
+      // quoted, booked, or turned us down is finished; one whose phone merely
+      // rang out never actually heard from us, so they stay in the list.
+      let skipped = [];
+      if (!phoneMode && !body.callEveryone) {
+        const parts = split(targets, path.join(process.cwd(), 'calls'));
+        skipped = parts.skip;
+        targets = parts.toCall;
+        if (skipped.length) {
+          log.info('queue', `skipping ${skipped.length} already spoken to: ${skipped.map((c) => c.name).join(', ')}`);
+        }
+        if (!targets.length) {
+          return json(res, 400, {
+            ok: false,
+            error: `all ${skipped.length} of these have already been called about this job - search for more, or tick "call everyone again".`,
+          });
+        }
+      }
+
       // Tell them now, not after the phone has rung out. A dead tunnel means
       // the caller hears "an application error has occurred", which looks like
       // the agent is broken when the real problem is out here.
@@ -353,7 +378,7 @@ const server = http.createServer(async (req, res) => {
 
       q.load(targets, { mode: phoneMode ? 'phone' : 'contractors' });
       q.start().catch((err) => log.fail('QUEUE_START', err.message));
-      return json(res, 200, { ok: true, status: q.status() });
+      return json(res, 200, { ok: true, status: q.status(), skipped: skipped.map((c) => c.name) });
     } catch (err) {
       return json(res, 400, { ok: false, error: err.message });
     }
