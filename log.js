@@ -13,6 +13,8 @@ function stamp() {
 // Anything not on this list is not a boundary, it is detail - use log.info.
 export const STAGES = [
   'ENV',                  // config loaded and sane
+  'DISCOVERY_SEARCH',     // we asked for a list of companies
+  'DISCOVERY_RESULTS',    // we got one back, with dialable numbers
   'HTTP_LISTEN',          // our server is up
   'TUNNEL',               // public host answers
   'CALL_CREATE',          // we asked Twilio to dial
