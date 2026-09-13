@@ -104,6 +104,91 @@ console.log('\ngreeting cancelled over and over:');
   check('gives up after 3 total attempts', greetings(), 3);
 }
 
+console.log('\nshe does not cut in while they are still talking:');
+{
+  // The bug: the pause was a plain timer, so whatever you were saying at the
+  // 2s mark got talked over. Now the timer is a minimum, not a deadline.
+  const rt = new Realtime({ instructions: 'test', greetingDelayMs: 100 });
+  const sent = [];
+  rt.ws = { readyState: 1, send: (s) => sent.push(JSON.parse(s)) };
+  rt.ready = true;
+  const greetings = () => sent.filter((m) => m.type === 'response.create').length;
+
+  rt.speakFirst('say hi and disclose');
+  rt.onAzureEvent({ type: 'input_audio_buffer.speech_started' });
+  await wait(250);
+  check('holds while they are mid-sentence', greetings(), 0);
+
+  rt.onAzureEvent({ type: 'input_audio_buffer.speech_stopped' });
+  // VAD does not open a turn of its own, so she has to.
+  await wait(1400);
+  check('...then greets once they pause', greetings(), 1);
+}
+
+console.log('\nshe does not say hello twice:');
+{
+  // Semantic VAD makes its own reply when a turn ends. If we also asked for
+  // one, that is two greetings on top of each other.
+  const rt = new Realtime({ instructions: 'test', greetingDelayMs: 100 });
+  const sent = [];
+  rt.ws = { readyState: 1, send: (s) => sent.push(JSON.parse(s)) };
+  rt.ready = true;
+  const greetings = () => sent.filter((m) => m.type === 'response.create').length;
+
+  rt.speakFirst('say hi and disclose');
+  rt.onAzureEvent({ type: 'input_audio_buffer.speech_started' });
+  await wait(250);
+  rt.onAzureEvent({ type: 'input_audio_buffer.speech_stopped' });
+  rt.onAzureEvent({ type: 'response.created', response: { id: 'vad_1' } });
+  await wait(1400);
+  check('the turn VAD opened is used as the greeting', greetings(), 0);
+
+  rt.onAzureEvent({ type: 'response.output_audio.delta', delta: 'AAAA' });
+  rt.onAzureEvent({ type: 'response.done', response: { id: 'vad_1', status: 'completed' } });
+  await wait(200);
+  check('...and it counts as delivered', rt.greetingPending, false);
+}
+
+console.log('\na second breath does not trigger her either:');
+{
+  const rt = new Realtime({ instructions: 'test', greetingDelayMs: 100 });
+  const sent = [];
+  rt.ws = { readyState: 1, send: (s) => sent.push(JSON.parse(s)) };
+  rt.ready = true;
+  const greetings = () => sent.filter((m) => m.type === 'response.create').length;
+
+  rt.speakFirst('say hi and disclose');
+  rt.onAzureEvent({ type: 'input_audio_buffer.speech_started' });
+  await wait(200);
+  rt.onAzureEvent({ type: 'input_audio_buffer.speech_stopped' });
+  // They pause for breath and carry straight on.
+  await wait(200);
+  rt.onAzureEvent({ type: 'input_audio_buffer.speech_started' });
+  await wait(1400);
+  check('still holding while they carry on', greetings(), 0);
+
+  rt.onAzureEvent({ type: 'input_audio_buffer.speech_stopped' });
+  await wait(1400);
+  check('...greets when they are actually done', greetings(), 1);
+}
+
+console.log('\na line that never goes quiet still hears the disclosure:');
+{
+  const rt = new Realtime({ instructions: 'test', greetingDelayMs: 100, greetingMaxWaitMs: 300 });
+  const sent = [];
+  rt.ws = { readyState: 1, send: (s) => sent.push(JSON.parse(s)) };
+  rt.ready = true;
+  const greetings = () => sent.filter((m) => m.type === 'response.create').length;
+
+  rt.speakFirst('say hi and disclose');
+  rt.onAzureEvent({ type: 'input_audio_buffer.speech_started' });
+  await wait(500);
+  // Past the ceiling now, so the next pause check gives up waiting.
+  rt.onAzureEvent({ type: 'input_audio_buffer.speech_stopped' });
+  await wait(1400);
+  check('disclosure is not lost to a noisy line', greetings(), 1);
+}
+
 console.log('');
 console.log(failures ? `${failures} FAILED` : 'all greeting tests passed');
 process.exit(failures ? 1 : 0);

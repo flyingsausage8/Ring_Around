@@ -32,6 +32,7 @@ export const STAGES = [
   'AZURE_SESSION_SENT',   // we configured the session
   'AZURE_SESSION_READY',  // Azure confirmed the session
   'AGENT_GREET',          // we asked the agent to speak first
+  'AGENT_GREET_HOLD',     // they were still talking, so the greeting waited
   'CALLER_AUDIO_IN',      // first audio from the phone
   'AZURE_AUDIO_IN',       // first audio appended to Azure
   'AZURE_AUDIO_OUT',      // first audio back from Azure

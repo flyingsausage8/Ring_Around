@@ -7,11 +7,12 @@ import * as log from './log.js';
 const PCMU = { type: 'audio/pcmu' };
 
 export class Realtime {
-  constructor({ tag = 'azure', instructions = '', tools = [], greetingDelayMs = cfg.greetingDelayMs, onToolCall, onCallerTranscript, onAudio, onBargeIn, onClose, onResponseStart, onTranscript } = {}) {
+  constructor({ tag = 'azure', instructions = '', tools = [], greetingDelayMs = cfg.greetingDelayMs, greetingMaxWaitMs = cfg.greetingMaxWaitMs, onToolCall, onCallerTranscript, onAudio, onBargeIn, onClose, onResponseStart, onTranscript } = {}) {
     this.tag = tag;
     this.instructions = instructions;
     this.tools = tools;
     this.greetingDelayMs = greetingDelayMs;
+    this.greetingMaxWaitMs = greetingMaxWaitMs;
     this.onToolCall = onToolCall || (() => ({ ok: false, error: 'no tool handler wired' }));
     this.onCallerTranscript = onCallerTranscript || (() => {});
     this.onAudio = onAudio || (() => {});
@@ -29,6 +30,13 @@ export class Realtime {
     this.greetingAttempts = 0;
     this.greetingResponseId = null;
     this.awaitingGreetingId = false;
+    // Is there sound on the line right now? speech_started without a matching
+    // speech_stopped. Used only to avoid opening her mouth mid-sentence -
+    // it counts events, it does not look at what was said.
+    this.callerSpeaking = false;
+    this.greetingDeferred = false;
+    this.greetingArmedAt = 0;
+    this.greetingAdoptTimer = null;
     this.audioFramesThisResponse = 0;
     this.currentResponseId = null;
     this.pendingTranscript = null;
@@ -172,6 +180,7 @@ export class Realtime {
         // in the middle of her sentence. The cancel below is the real signal.
         log.info('azure', 'caller audio started');
         this.speechStoppedAt = null;
+        this.callerSpeaking = true;
         break;
 
       // Time from "caller stopped talking" to "first audio of the reply" is
@@ -180,6 +189,8 @@ export class Realtime {
       case 'input_audio_buffer.speech_stopped':
         this.speechStoppedAt = Date.now();
         this.latencyLogged = false;
+        this.callerSpeaking = false;
+        if (this.greetingDeferred) this.#greetAfterTheirTurn();
         break;
 
       case 'conversation.item.input_audio_transcription.completed':
@@ -329,12 +340,48 @@ export class Realtime {
     this.greetingPrompt = prompt;
     this.greetingPending = true;
     this.greetingAttempts = 0;
+    this.greetingArmedAt = Date.now();
     // Hold for a beat so they can say who they are first.
     if (this.greetingDelayMs > 0) {
-      this.whenReady(() => setTimeout(() => this.#createGreeting(), this.greetingDelayMs));
+      this.whenReady(() => setTimeout(() => this.#greetOnceTheyPause(), this.greetingDelayMs));
     } else {
       this.whenReady(() => this.#createGreeting());
     }
+  }
+
+  // The pause is up, but a fixed timer knows nothing about whether anyone is
+  // mid-sentence. "Appliance Repair, this is Dave-" takes longer than two
+  // seconds, and cutting in there is exactly what it sounds like. Wait for a
+  // gap. The ceiling only exists so a permanently noisy line still gets the
+  // disclosure rather than sitting mute forever.
+  #greetOnceTheyPause() {
+    if (!this.greetingPending) return;
+    if (this.callerSpeaking && Date.now() - this.greetingArmedAt < this.greetingMaxWaitMs) {
+      if (!this.greetingDeferred) {
+        this.greetingDeferred = true;
+        log.stage('AGENT_GREET_HOLD', 'they are still talking - waiting for a gap');
+      }
+      return;
+    }
+    this.#createGreeting();
+  }
+
+  // They stopped. Semantic VAD makes a reply by itself when it judges a turn
+  // has ended, so asking for one here would have her say hello twice. Give
+  // that reply a moment to show up and treat it as the greeting; if none
+  // comes - VAD decided the noise was not a turn - say it ourselves.
+  #greetAfterTheirTurn() {
+    this.greetingDeferred = false;
+    if (!this.greetingPending) return;
+    this.awaitingGreetingId = true;
+    this.audioFramesThisResponse = 0;
+    clearTimeout(this.greetingAdoptTimer);
+    this.greetingAdoptTimer = setTimeout(() => {
+      if (!this.greetingPending) return;
+      if (this.greetingResponseId) return;      // VAD already opened the turn
+      if (this.callerSpeaking) { this.greetingDeferred = true; return; }
+      this.#createGreeting();
+    }, 1200);
   }
 
   #createGreeting() {

@@ -52,6 +52,10 @@ export const cfg = {
   // they miss the disclosure and spend the next twenty seconds repeating their
   // own name. Let them go first.
   greetingDelayMs: Number(process.env.GREETING_DELAY_MS || 2000),
+  // ...and if they are still mid-sentence when that is up, how long she will
+  // keep waiting for a gap before disclosing anyway. Only a backstop: a line
+  // that never goes quiet must still hear that it is talking to an AI.
+  greetingMaxWaitMs: Number(process.env.GREETING_MAX_WAIT_MS || 30000),
   // How long the phone may ring before Twilio gives up.
   ringSeconds: Number(process.env.RING_SECONDS || 25),
   // Breathing room between calls, so the queue is not machine-gunning the line.
